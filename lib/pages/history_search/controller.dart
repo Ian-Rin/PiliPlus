@@ -27,6 +27,9 @@ class HistorySearchController
 
   final account = Accounts.history;
 
+  @override
+  String get wordsKey => 'historySearchWords';
+
   Future<void> onDelHistory(int index, kid, String business) async {
     final res = await UserHttp.delHistory(
       '${business}_$kid',
