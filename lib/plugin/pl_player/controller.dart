@@ -101,6 +101,24 @@ class _StartupTrace {
   String get report => '[起播耗时] $label，共 ${elapsed}ms\n${_notes.join('\n')}';
 }
 
+/// What the player did around a trip to the background (see
+/// [PlPlayerController.onAppLifecycle]): mpv's video state at a few moments,
+/// and the events in between. Logged to 设置 → 日志.
+class _BackgroundTrace {
+  final _clock = Stopwatch()..start();
+  final _notes = <String>[];
+  bool done = false;
+
+  void mark(String note) {
+    if (done || _notes.length >= 40) return;
+    _notes.add(
+      '${(_clock.elapsedMilliseconds / 1000).toStringAsFixed(1)}s $note',
+    );
+  }
+
+  String get report => '[后台切换]\n${_notes.join('\n')}';
+}
+
 class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
   Player? _videoPlayerController;
   VideoController? _videoController;
@@ -637,31 +655,96 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
   // nudge (see [onAppLifecycle]).
   bool _nudgeOnPlay = false;
 
+  _BackgroundTrace? _bgTrace;
+
+  /// mpv's video state, for [_bgTrace]: how far the picture is behind the
+  /// sound (avsync), frames decoded and dropped, whether the video output is
+  /// set up. Synchronous reads, so only at a few moments, never per frame.
+  String _videoState(Player player) {
+    String read(String name) {
+      try {
+        final value = player.getProperty(name);
+        return value.isEmpty ? '-' : value;
+      } catch (_) {
+        return '?';
+      }
+    }
+
+    final state = player.state;
+    return '${state.playing ? '播放中' : '暂停'} '
+        '位置 ${(state.position.inMilliseconds / 1000).toStringAsFixed(1)}s '
+        '缓冲到 ${(state.buffer.inMilliseconds / 1000).toStringAsFixed(1)}s '
+        'avsync ${read('avsync')} '
+        '解码帧 ${read('estimated-frame-number')} '
+        '丢帧 ${read('frame-drop-count')}/${read('decoder-frame-drop-count')} '
+        '延迟帧 ${read('vo-delayed-frame-count')} '
+        'vo ${read('vo-configured')}';
+  }
+
+  void _sampleLater(Player player, Duration after, String label) {
+    final trace = _bgTrace;
+    Future<void>.delayed(after, () {
+      if (!identical(_bgTrace, trace) || trace!.done) return;
+      if (!identical(_videoPlayerController, player)) return;
+      trace.mark('$label ${_videoState(player)}');
+    });
+  }
+
+  void _reportBackgroundLater(Duration after) {
+    final trace = _bgTrace;
+    Future<void>.delayed(after, () {
+      if (!identical(_bgTrace, trace) || trace!.done) return;
+      trace.done = true;
+      Utils.reportError(trace.report);
+    });
+  }
+
   /// iOS stops an app drawing while it is in the background. Back in the
   /// foreground, the picture can stay on its last frame while the sound plays,
   /// whether the video played on in the background or is started again (a
   /// double tap); a pause and a resume set it going with the sound. That is
   /// done here once after more than two seconds away: at once for a video
   /// still playing, else at its next start.
+  ///
+  /// Each such trip is logged too ([_bgTrace]), mpv's video state before and
+  /// after the pause and resume: to find out why the picture stops, rather
+  /// than only setting it going again.
   void onAppLifecycle(AppLifecycleState state) {
     if (!Platform.isIOS) return;
+    final player = _videoPlayerController;
     if (state == .paused) {
       _backgroundSince = DateTime.now();
+      if (player != null) {
+        _bgTrace = _BackgroundTrace()
+          ..mark(
+            '切到后台 ${onlyPlayAudio.value ? '（只听声音）' : ''}'
+            '${_videoState(player)}',
+          );
+      }
       return;
     }
     if (state != .resumed) return;
     final since = _backgroundSince;
     _backgroundSince = null;
-    final player = _videoPlayerController;
-    if (since == null ||
-        player == null ||
-        DateTime.now().difference(since) < const Duration(seconds: 2)) {
+    final away = since == null ? null : DateTime.now().difference(since);
+    if (away == null || player == null || away < const Duration(seconds: 2)) {
+      _bgTrace = null;
       return;
     }
+    _bgTrace?.mark(
+      '回到前台，离开 ${away.inSeconds}s ${_videoState(player)}',
+    );
+    _sampleLater(player, const Duration(seconds: 1), '回来 1 秒');
+    _sampleLater(player, const Duration(seconds: 3), '回来 3 秒');
     if (player.state.playing) {
       _nudgePicture(player);
+      _sampleLater(player, const Duration(milliseconds: 1500), '自动暂停继续后');
+      _reportBackgroundLater(const Duration(seconds: 6));
     } else {
       _nudgeOnPlay = true;
+      // Logged once the video starts again (see the playing listener), or
+      // after two minutes if it does not.
+      _reportBackgroundLater(const Duration(minutes: 2));
     }
   }
 
@@ -672,6 +755,7 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
       bool current() =>
           identical(_videoPlayerController, player) && _playerCount != 0;
       if (!current() || !player.state.playing) return;
+      _bgTrace?.mark('自动暂停再继续');
       await player.pause();
       await Future<void>.delayed(const Duration(milliseconds: 100));
       if (current()) await player.play();
@@ -1350,11 +1434,23 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
       stream.playing.listen((bool playing) {
         if (playing) {
           _startup?.mark('开始播放', once: 'playing');
+          _bgTrace?.mark('开始播放');
           if (_nudgeOnPlay) {
             _nudgeOnPlay = false;
             // A moment after the start, as a second pause and resume did.
             if (_videoPlayerController case final player?) {
+              _sampleLater(
+                player,
+                const Duration(milliseconds: 250),
+                '开始播放 0.25 秒（自动处理前）',
+              );
               _nudgePicture(player, after: const Duration(milliseconds: 300));
+              _sampleLater(
+                player,
+                const Duration(seconds: 2),
+                '开始播放 2 秒（自动处理后）',
+              );
+              _reportBackgroundLater(const Duration(seconds: 4));
             }
           }
           playerStatus = .playing;
@@ -1370,6 +1466,7 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
             }
           }
         } else {
+          _bgTrace?.mark('暂停');
           playerStatus = .paused;
           _startWakeLockTimer();
           _disableAutoEnterPip();
@@ -1435,6 +1532,7 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
         }
       }),
       stream.videoParams.listen((VideoParams params) {
+        _bgTrace?.mark('画面参数 ${params.dw}x${params.dh}');
         if (params.dw != null) {
           _startup?.mark(
             '解码出第一帧 ${params.dw}x${params.dh}',
@@ -1451,6 +1549,7 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
       }),
       stream.buffering.listen((bool buffering) {
         _startup?.mark(buffering ? '开始转圈' : '转圈结束');
+        _bgTrace?.mark(buffering ? '开始转圈' : '转圈结束');
         if (buffering &&
             !isBuffering.value &&
             !_ripperRestarting &&
