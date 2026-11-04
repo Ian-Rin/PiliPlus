@@ -310,5 +310,163 @@
         ]
       }
     ]
+  },
+  {
+    "urls": [
+      "https://node0.bilivideo.com/v.m4s",
+      "https://node1.bilivideo.com/v.m4s",
+      "https://node2.bilivideo.com/v.m4s",
+      "https://node3.bilivideo.com/v.m4s"
+    ],
+    "speeds": [
+      1100000,
+      100000,
+      0,
+      500000
+    ],
+    "steps": [
+      {
+        "count": 2,
+        "expected": [
+          "https://node0.bilivideo.com/v.m4s",
+          "https://node3.bilivideo.com/v.m4s"
+        ]
+      },
+      {
+        "count": 2,
+        "expected": [
+          "https://node0.bilivideo.com/v.m4s",
+          "https://node3.bilivideo.com/v.m4s"
+        ]
+      },
+      {
+        "count": 2,
+        "expected": [
+          "https://node0.bilivideo.com/v.m4s",
+          "https://node3.bilivideo.com/v.m4s"
+        ]
+      },
+      {
+        "count": 2,
+        "expected": [
+          "https://node0.bilivideo.com/v.m4s",
+          "https://node2.bilivideo.com/v.m4s"
+        ]
+      },
+      {
+        "count": 8,
+        "expected": [
+          "https://node0.bilivideo.com/v.m4s",
+          "https://node3.bilivideo.com/v.m4s",
+          "https://node0.bilivideo.com/v.m4s",
+          "https://node0.bilivideo.com/v.m4s",
+          "https://node3.bilivideo.com/v.m4s",
+          "https://node0.bilivideo.com/v.m4s",
+          "https://node2.bilivideo.com/v.m4s",
+          "https://node2.bilivideo.com/v.m4s"
+        ]
+      },
+      {
+        "count": 16,
+        "expected": [
+          "https://node0.bilivideo.com/v.m4s",
+          "https://node3.bilivideo.com/v.m4s",
+          "https://node0.bilivideo.com/v.m4s",
+          "https://node0.bilivideo.com/v.m4s",
+          "https://node3.bilivideo.com/v.m4s",
+          "https://node0.bilivideo.com/v.m4s",
+          "https://node0.bilivideo.com/v.m4s",
+          "https://node1.bilivideo.com/v.m4s",
+          "https://node0.bilivideo.com/v.m4s",
+          "https://node3.bilivideo.com/v.m4s",
+          "https://node0.bilivideo.com/v.m4s",
+          "https://node0.bilivideo.com/v.m4s",
+          "https://node3.bilivideo.com/v.m4s",
+          "https://node0.bilivideo.com/v.m4s",
+          "https://node2.bilivideo.com/v.m4s",
+          "https://node2.bilivideo.com/v.m4s"
+        ]
+      }
+    ]
+  },
+  {
+    "urls": [
+      "https://node0.bilivideo.com/v.m4s",
+      "https://node1.bilivideo.com/v.m4s",
+      "https://node2.bilivideo.com/v.m4s",
+      "https://node3.bilivideo.com/v.m4s",
+      "https://node4.bilivideo.com/v.m4s"
+    ],
+    "speeds": [
+      1200000,
+      110000,
+      105000,
+      0,
+      0
+    ],
+    "steps": [
+      {
+        "count": 2,
+        "expected": [
+          "https://node0.bilivideo.com/v.m4s",
+          "https://node0.bilivideo.com/v.m4s"
+        ]
+      },
+      {
+        "count": 2,
+        "expected": [
+          "https://node0.bilivideo.com/v.m4s",
+          "https://node0.bilivideo.com/v.m4s"
+        ]
+      },
+      {
+        "count": 2,
+        "expected": [
+          "https://node0.bilivideo.com/v.m4s",
+          "https://node0.bilivideo.com/v.m4s"
+        ]
+      },
+      {
+        "count": 2,
+        "expected": [
+          "https://node0.bilivideo.com/v.m4s",
+          "https://node3.bilivideo.com/v.m4s"
+        ]
+      },
+      {
+        "count": 8,
+        "expected": [
+          "https://node0.bilivideo.com/v.m4s",
+          "https://node0.bilivideo.com/v.m4s",
+          "https://node0.bilivideo.com/v.m4s",
+          "https://node0.bilivideo.com/v.m4s",
+          "https://node1.bilivideo.com/v.m4s",
+          "https://node0.bilivideo.com/v.m4s",
+          "https://node4.bilivideo.com/v.m4s",
+          "https://node3.bilivideo.com/v.m4s"
+        ]
+      },
+      {
+        "count": 16,
+        "expected": [
+          "https://node0.bilivideo.com/v.m4s",
+          "https://node0.bilivideo.com/v.m4s",
+          "https://node0.bilivideo.com/v.m4s",
+          "https://node0.bilivideo.com/v.m4s",
+          "https://node1.bilivideo.com/v.m4s",
+          "https://node0.bilivideo.com/v.m4s",
+          "https://node0.bilivideo.com/v.m4s",
+          "https://node0.bilivideo.com/v.m4s",
+          "https://node2.bilivideo.com/v.m4s",
+          "https://node0.bilivideo.com/v.m4s",
+          "https://node0.bilivideo.com/v.m4s",
+          "https://node0.bilivideo.com/v.m4s",
+          "https://node4.bilivideo.com/v.m4s",
+          "https://node3.bilivideo.com/v.m4s",
+          "https://node4.bilivideo.com/v.m4s",
+          "https://node3.bilivideo.com/v.m4s"
+        ]
+      }
+    ]
   }
 ]

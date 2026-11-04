@@ -1,0 +1,1572 @@
+{
+  "defaults": {
+    "mode": "overseas",
+    "customHosts": [],
+    "representation": {
+      "baseUrl": "https://upos-sz-mirroraliov.bilivideo.com/upgcxcode/12/34/567/567-1-30080.m4s?e=ig8euxZM&os=upos&sign=a%2Bb",
+      "backupUrl": [
+        "https://upos-hz-mirrorakam.akamaized.net/upgcxcode/12/34/567/567-1-30080.m4s?e=ig8euxZM&os=akam&sign=c%2Bd"
+      ]
+    },
+    "settings": {
+      "concurrency": 8,
+      "autoConcurrency": false
+    },
+    "fileSize": 8388608,
+    "network": {
+      "default": {
+        "headMs": 41,
+        "chunkBytes": 16384,
+        "chunkMs": 7
+      },
+      "hosts": {},
+      "requests": []
+    },
+    "runMs": 120000
+  },
+  "scenarios": [
+    {
+      "name": "one range on even nodes",
+      "calls": [
+        {
+          "at": 0,
+          "start": 0,
+          "end": 1048575,
+          "kind": "video"
+        }
+      ]
+    },
+    {
+      "name": "whole range without onOrderedChunk",
+      "calls": [
+        {
+          "at": 0,
+          "start": 65536,
+          "end": 786431,
+          "kind": "video",
+          "progressive": false
+        }
+      ]
+    },
+    {
+      "name": "not parallel",
+      "calls": [
+        {
+          "at": 0,
+          "start": 0,
+          "end": 262143,
+          "kind": "video",
+          "parallel": false
+        }
+      ]
+    },
+    {
+      "name": "one slow node gets hedged",
+      "network": {
+        "hosts": {
+          "upos-sz-mirrorcosov.bilivideo.com": {
+            "headMs": 113,
+            "chunkMs": 97
+          }
+        }
+      },
+      "calls": [
+        {
+          "at": 0,
+          "start": 0,
+          "end": 1048575,
+          "kind": "video"
+        }
+      ]
+    },
+    {
+      "name": "a node stalls midway and the piece resumes elsewhere",
+      "network": {
+        "hosts": {
+          "upos-sz-mirroraliov.bilivideo.com": {
+            "stallAfter": 49152
+          }
+        }
+      },
+      "calls": [
+        {
+          "at": 0,
+          "start": 0,
+          "end": 1048575,
+          "kind": "video"
+        }
+      ]
+    },
+    {
+      "name": "refused addresses (403) get banned",
+      "network": {
+        "hosts": {
+          "cn-hk-eq-01-01.bilivideo.com": {
+            "status": 403,
+            "headMs": 23
+          }
+        }
+      },
+      "calls": [
+        {
+          "at": 0,
+          "start": 0,
+          "end": 524287,
+          "kind": "video"
+        },
+        {
+          "at": 3001,
+          "start": 524288,
+          "end": 1048575,
+          "kind": "video"
+        }
+      ]
+    },
+    {
+      "name": "first byte timeout",
+      "network": {
+        "hosts": {
+          "cn-hk-eq-01-03.bilivideo.com": {
+            "headMs": 7003
+          }
+        }
+      },
+      "calls": [
+        {
+          "at": 0,
+          "start": 0,
+          "end": 524287,
+          "kind": "video"
+        }
+      ]
+    },
+    {
+      "name": "truncated body, wrong Content-Range and network errors",
+      "network": {
+        "hosts": {
+          "upos-sz-mirrorcosov.bilivideo.com": {
+            "endAfter": 20000
+          },
+          "cn-hk-eq-01-01.bilivideo.com": {
+            "badRange": true
+          },
+          "cn-hk-eq-01-03.bilivideo.com": {
+            "networkError": true,
+            "headMs": 17
+          }
+        }
+      },
+      "calls": [
+        {
+          "at": 0,
+          "start": 0,
+          "end": 1048575,
+          "kind": "video"
+        }
+      ]
+    },
+    {
+      "name": "meta range races the startup candidates",
+      "network": {
+        "hosts": {
+          "upos-sz-mirroraliov.bilivideo.com": {
+            "headMs": 397
+          }
+        }
+      },
+      "calls": [
+        {
+          "at": 0,
+          "start": 0,
+          "end": 4095,
+          "kind": "meta"
+        }
+      ]
+    },
+    {
+      "name": "meta range when the first candidates fail",
+      "network": {
+        "hosts": {
+          "upos-sz-mirroraliov.bilivideo.com": {
+            "status": 404
+          },
+          "upos-hz-mirrorakam.akamaized.net": {
+            "networkError": true
+          },
+          "upos-sz-mirrorcosov.bilivideo.com": {
+            "status": 503
+          }
+        }
+      },
+      "calls": [
+        {
+          "at": 0,
+          "start": 0,
+          "end": 4095,
+          "kind": "meta"
+        }
+      ]
+    },
+    {
+      "name": "startup media range: probe then pieces",
+      "network": {
+        "hosts": {
+          "cn-hk-eq-01-01.bilivideo.com": {
+            "headMs": 211,
+            "chunkMs": 19
+          }
+        }
+      },
+      "calls": [
+        {
+          "at": 0,
+          "start": 0,
+          "end": 2097151,
+          "kind": "video",
+          "startup": true
+        }
+      ]
+    },
+    {
+      "name": "startup audio range",
+      "calls": [
+        {
+          "at": 0,
+          "start": 0,
+          "end": 786431,
+          "kind": "audio",
+          "startup": true
+        }
+      ]
+    },
+    {
+      "name": "abort while downloading",
+      "calls": [
+        {
+          "at": 0,
+          "start": 0,
+          "end": 1048575,
+          "kind": "video",
+          "abortAt": 77
+        }
+      ]
+    },
+    {
+      "name": "warm-up ranges then measured assignments",
+      "network": {
+        "hosts": {
+          "upos-sz-mirrorcosov.bilivideo.com": {
+            "chunkMs": 3
+          },
+          "cn-hk-eq-01-03.bilivideo.com": {
+            "chunkMs": 29
+          }
+        }
+      },
+      "calls": [
+        {
+          "at": 0,
+          "start": 0,
+          "end": 524287,
+          "kind": "video"
+        },
+        {
+          "at": 2003,
+          "start": 524288,
+          "end": 1048575,
+          "kind": "video"
+        },
+        {
+          "at": 4007,
+          "start": 1048576,
+          "end": 1572863,
+          "kind": "video"
+        },
+        {
+          "at": 6011,
+          "start": 1572864,
+          "end": 2097151,
+          "kind": "video"
+        },
+        {
+          "at": 8017,
+          "start": 2097152,
+          "end": 3145727,
+          "kind": "video"
+        },
+        {
+          "at": 10037,
+          "start": 3145728,
+          "end": 4194303,
+          "kind": "video"
+        }
+      ]
+    },
+    {
+      "name": "mainland mode",
+      "mode": "mainland",
+      "representation": {
+        "baseUrl": "https://upos-sz-mirrorali.bilivideo.com/upgcxcode/12/34/567/567-1-30080.m4s?e=ig8euxZM&os=upos&sign=a%2Bb",
+        "backupUrl": [
+          "https://upos-sz-mirrorcos.bilivideo.com/upgcxcode/12/34/567/567-1-30080.m4s?e=ig8euxZM&os=upos&sign=a%2Bb"
+        ]
+      },
+      "network": {
+        "hosts": {
+          "upos-sz-mirrorhw.bilivideo.com": {
+            "chunkMs": 53
+          }
+        }
+      },
+      "calls": [
+        {
+          "at": 0,
+          "start": 0,
+          "end": 4095,
+          "kind": "meta"
+        },
+        {
+          "at": 503,
+          "start": 4096,
+          "end": 1052671,
+          "kind": "video",
+          "startup": true
+        },
+        {
+          "at": 4001,
+          "start": 1052672,
+          "end": 2101247,
+          "kind": "video"
+        }
+      ]
+    },
+    {
+      "name": "two ranges at once share the connections",
+      "settings": {
+        "concurrency": 4
+      },
+      "calls": [
+        {
+          "at": 0,
+          "start": 0,
+          "end": 1048575,
+          "kind": "video"
+        },
+        {
+          "at": 13,
+          "start": 1048576,
+          "end": 2097151,
+          "kind": "video"
+        }
+      ]
+    },
+    {
+      "name": "automatic thread count",
+      "settings": {
+        "concurrency": 8,
+        "autoConcurrency": true
+      },
+      "network": {
+        "default": {
+          "headMs": 61,
+          "chunkBytes": 16384,
+          "chunkMs": 31
+        }
+      },
+      "calls": [
+        {
+          "at": 0,
+          "start": 0,
+          "end": 2097151,
+          "kind": "video",
+          "startup": true
+        },
+        {
+          "at": 9001,
+          "start": 2097152,
+          "end": 4194303,
+          "kind": "video"
+        }
+      ]
+    },
+    {
+      "name": "rate limited (429) with automatic thread count",
+      "settings": {
+        "concurrency": 8,
+        "autoConcurrency": true
+      },
+      "network": {
+        "hosts": {
+          "upos-sz-mirrorcosov.bilivideo.com": {
+            "status": 429
+          }
+        }
+      },
+      "calls": [
+        {
+          "at": 0,
+          "start": 0,
+          "end": 1048575,
+          "kind": "video"
+        }
+      ]
+    },
+    {
+      "name": "every node fails",
+      "network": {
+        "default": {
+          "headMs": 41,
+          "chunkBytes": 16384,
+          "chunkMs": 7,
+          "status": 500
+        }
+      },
+      "calls": [
+        {
+          "at": 0,
+          "start": 0,
+          "end": 262143,
+          "kind": "video"
+        }
+      ]
+    },
+    {
+      "name": "a node fails only its first two requests",
+      "network": {
+        "requests": [
+          {
+            "host": "upos-sz-mirroraliov.bilivideo.com",
+            "nth": 0,
+            "status": 502
+          },
+          {
+            "host": "upos-sz-mirroraliov.bilivideo.com",
+            "nth": 1,
+            "stallAfter": 40960
+          }
+        ]
+      },
+      "calls": [
+        {
+          "at": 0,
+          "start": 0,
+          "end": 1048575,
+          "kind": "video"
+        },
+        {
+          "at": 5003,
+          "start": 1048576,
+          "end": 2097151,
+          "kind": "video"
+        }
+      ]
+    },
+    {
+      "name": "deadline: hedgeDue decides the copies",
+      "network": {
+        "hosts": {
+          "upos-sz-mirrorcosov.bilivideo.com": {
+            "headMs": 113,
+            "chunkMs": 97
+          }
+        }
+      },
+      "calls": [
+        {
+          "at": 0,
+          "start": 0,
+          "end": 1048575,
+          "kind": "video",
+          "deadlineMs": 600
+        }
+      ]
+    },
+    {
+      "name": "deadline: a slow node is rescued early",
+      "network": {
+        "default": {
+          "headMs": 41,
+          "chunkBytes": 16384,
+          "chunkMs": 23
+        },
+        "hosts": {
+          "cn-hk-eq-01-01.bilivideo.com": {
+            "chunkMs": 211
+          }
+        }
+      },
+      "calls": [
+        {
+          "at": 0,
+          "start": 0,
+          "end": 524287,
+          "kind": "video"
+        },
+        {
+          "at": 2003,
+          "start": 524288,
+          "end": 1572863,
+          "kind": "video",
+          "deadlineMs": 450
+        }
+      ]
+    },
+    {
+      "name": "deadline far ahead: no copy yet",
+      "network": {
+        "hosts": {
+          "upos-sz-mirrorcosov.bilivideo.com": {
+            "headMs": 113,
+            "chunkMs": 61
+          }
+        }
+      },
+      "calls": [
+        {
+          "at": 0,
+          "start": 0,
+          "end": 1048575,
+          "kind": "video",
+          "deadlineMs": 20000
+        }
+      ]
+    },
+    {
+      "name": "deadline on a startup range",
+      "network": {
+        "hosts": {
+          "cn-hk-eq-01-03.bilivideo.com": {
+            "chunkMs": 89
+          }
+        }
+      },
+      "calls": [
+        {
+          "at": 0,
+          "start": 0,
+          "end": 2097151,
+          "kind": "video",
+          "startup": true,
+          "deadlineMs": 800
+        }
+      ]
+    },
+    {
+      "name": "a truncated piece resumes from what it kept",
+      "network": {
+        "hosts": {
+          "upos-sz-mirroraliov.bilivideo.com": {
+            "endAfter": 40960
+          }
+        }
+      },
+      "calls": [
+        {
+          "at": 0,
+          "start": 0,
+          "end": 1048575,
+          "kind": "video"
+        }
+      ]
+    },
+    {
+      "name": "probe losers below the speed-sample size",
+      "network": {
+        "default": {
+          "headMs": 41,
+          "chunkBytes": 16384,
+          "chunkMs": 9
+        },
+        "hosts": {
+          "upos-sz-mirroraliov.bilivideo.com": {
+            "chunkMs": 5
+          }
+        }
+      },
+      "calls": [
+        {
+          "at": 0,
+          "start": 0,
+          "end": 2097151,
+          "kind": "video",
+          "startup": true
+        },
+        {
+          "at": 3001,
+          "start": 2097152,
+          "end": 3145727,
+          "kind": "video"
+        }
+      ]
+    },
+    {
+      "name": "mainland: every node fails on the second range",
+      "mode": "mainland",
+      "representation": {
+        "baseUrl": "https://upos-sz-mirrorali.bilivideo.com/upgcxcode/12/34/567/567-1-30080.m4s?e=ig8euxZM&os=upos&sign=a%2Bb",
+        "backupUrl": [
+          "https://upos-sz-mirrorcos.bilivideo.com/upgcxcode/12/34/567/567-1-30080.m4s?e=ig8euxZM&os=upos&sign=a%2Bb"
+        ]
+      },
+      "network": {
+        "requests": [
+          {
+            "host": "*",
+            "fromNth": 1,
+            "status": 500
+          }
+        ]
+      },
+      "calls": [
+        {
+          "at": 0,
+          "start": 0,
+          "end": 1048575,
+          "kind": "video"
+        },
+        {
+          "at": 2003,
+          "start": 1048576,
+          "end": 2097151,
+          "kind": "video"
+        }
+      ]
+    },
+    {
+      "name": "node speeds change between ranges",
+      "network": {
+        "requests": [
+          {
+            "host": "upos-sz-mirrorcosov.bilivideo.com",
+            "fromNth": 2,
+            "chunkMs": 31
+          },
+          {
+            "host": "cn-hk-eq-01-01.bilivideo.com",
+            "fromNth": 3,
+            "chunkMs": 2
+          },
+          {
+            "host": "upos-sz-mirroraliov.bilivideo.com",
+            "fromNth": 4,
+            "headMs": 157
+          }
+        ]
+      },
+      "calls": [
+        {
+          "at": 0,
+          "start": 0,
+          "end": 1048575,
+          "kind": "video"
+        },
+        {
+          "at": 1501,
+          "start": 1048576,
+          "end": 2097151,
+          "kind": "video"
+        },
+        {
+          "at": 3007,
+          "start": 2097152,
+          "end": 3145727,
+          "kind": "video"
+        },
+        {
+          "at": 4513,
+          "start": 3145728,
+          "end": 4194303,
+          "kind": "video"
+        },
+        {
+          "at": 6019,
+          "start": 4194304,
+          "end": 5242879,
+          "kind": "video"
+        },
+        {
+          "at": 7529,
+          "start": 5242880,
+          "end": 6291455,
+          "kind": "video"
+        }
+      ]
+    },
+    {
+      "name": "a node just above a twelfth of the fastest",
+      "network": {
+        "hosts": {
+          "upos-sz-mirrorcosov.bilivideo.com": {
+            "chunkMs": 3
+          },
+          "cn-hk-eq-01-03.bilivideo.com": {
+            "chunkMs": 74
+          }
+        }
+      },
+      "calls": [
+        {
+          "at": 0,
+          "start": 0,
+          "end": 1048575,
+          "kind": "video"
+        },
+        {
+          "at": 2003,
+          "start": 1048576,
+          "end": 2097151,
+          "kind": "video"
+        },
+        {
+          "at": 4007,
+          "start": 2097152,
+          "end": 3145727,
+          "kind": "video"
+        },
+        {
+          "at": 6011,
+          "start": 3145728,
+          "end": 4194303,
+          "kind": "video"
+        },
+        {
+          "at": 8017,
+          "start": 4194304,
+          "end": 5242879,
+          "kind": "video"
+        }
+      ]
+    },
+    {
+      "name": "deadlines while the connections are all busy",
+      "settings": {
+        "concurrency": 4
+      },
+      "network": {
+        "default": {
+          "headMs": 41,
+          "chunkBytes": 16384,
+          "chunkMs": 13
+        },
+        "hosts": {
+          "upos-sz-mirrorcosov.bilivideo.com": {
+            "chunkMs": 67
+          }
+        }
+      },
+      "calls": [
+        {
+          "at": 0,
+          "start": 0,
+          "end": 1048575,
+          "kind": "video",
+          "deadlineMs": 1500
+        },
+        {
+          "at": 7,
+          "start": 1048576,
+          "end": 2097151,
+          "kind": "video",
+          "deadlineMs": 700
+        },
+        {
+          "at": 19,
+          "start": 2097152,
+          "end": 2621439,
+          "kind": "audio",
+          "deadlineMs": 400
+        }
+      ]
+    },
+    {
+      "name": "deadline: copy only when the slack runs out",
+      "network": {
+        "hosts": {
+          "upos-sz-mirrorcosov.bilivideo.com": {
+            "headMs": 113,
+            "chunkMs": 97
+          }
+        }
+      },
+      "calls": [
+        {
+          "at": 0,
+          "start": 0,
+          "end": 1048575,
+          "kind": "video",
+          "deadlineMs": 2500
+        }
+      ]
+    },
+    {
+      "name": "player stalls and buffer reports drive the thread count",
+      "settings": {
+        "concurrency": 8,
+        "autoConcurrency": true
+      },
+      "network": {
+        "default": {
+          "headMs": 61,
+          "chunkBytes": 16384,
+          "chunkMs": 37
+        }
+      },
+      "signals": [
+        {
+          "at": 1,
+          "newSession": true
+        },
+        {
+          "at": 400,
+          "buffer": [
+            2.0,
+            true
+          ]
+        },
+        {
+          "at": 900,
+          "buffer": [
+            2.0,
+            true
+          ]
+        },
+        {
+          "at": 1400,
+          "buffer": [
+            2.0,
+            true
+          ]
+        },
+        {
+          "at": 1900,
+          "buffer": [
+            2.01,
+            true
+          ]
+        },
+        {
+          "at": 2600,
+          "buffer": [
+            2.0,
+            true
+          ]
+        },
+        {
+          "at": 3100,
+          "stall": true
+        },
+        {
+          "at": 6200,
+          "buffer": [
+            16.0,
+            true
+          ]
+        },
+        {
+          "at": 9000,
+          "buffer": [
+            16.0,
+            true
+          ]
+        }
+      ],
+      "calls": [
+        {
+          "at": 0,
+          "start": 0,
+          "end": 2097151,
+          "kind": "video",
+          "startup": true
+        },
+        {
+          "at": 2501,
+          "start": 2097152,
+          "end": 4194303,
+          "kind": "video"
+        },
+        {
+          "at": 5003,
+          "start": 4194304,
+          "end": 6291455,
+          "kind": "video"
+        }
+      ]
+    },
+    {
+      "name": "two truncated copies: the next pair resumes from the kept prefix",
+      "network": {
+        "hosts": {
+          "upos-sz-mirroraliov.bilivideo.com": {
+            "endAfter": 40960
+          },
+          "upos-hz-mirrorakam.akamaized.net": {
+            "endAfter": 16384
+          }
+        }
+      },
+      "calls": [
+        {
+          "at": 0,
+          "start": 0,
+          "end": 1048575,
+          "kind": "video"
+        }
+      ]
+    },
+    {
+      "name": "fast and slow nodes at 16 threads",
+      "settings": {
+        "concurrency": 16
+      },
+      "network": {
+        "hosts": {
+          "upos-sz-mirrorcosov.bilivideo.com": {
+            "chunkMs": 3
+          },
+          "cn-hk-eq-01-03.bilivideo.com": {
+            "chunkMs": 88
+          }
+        }
+      },
+      "calls": [
+        {
+          "at": 0,
+          "start": 0,
+          "end": 2097151,
+          "kind": "video"
+        },
+        {
+          "at": 2003,
+          "start": 2097152,
+          "end": 4194303,
+          "kind": "video"
+        },
+        {
+          "at": 4007,
+          "start": 4194304,
+          "end": 6291455,
+          "kind": "video"
+        },
+        {
+          "at": 6011,
+          "start": 6291456,
+          "end": 8388607,
+          "kind": "video"
+        },
+        {
+          "at": 8017,
+          "start": 8388608,
+          "end": 10485759,
+          "kind": "video"
+        },
+        {
+          "at": 10037,
+          "start": 10485760,
+          "end": 12582911,
+          "kind": "video"
+        }
+      ],
+      "fileSize": 16777216
+    },
+    {
+      "name": "fast and slow nodes at 8 threads",
+      "network": {
+        "hosts": {
+          "upos-sz-mirrorcosov.bilivideo.com": {
+            "chunkMs": 3
+          },
+          "cn-hk-eq-01-03.bilivideo.com": {
+            "chunkMs": 92
+          }
+        }
+      },
+      "calls": [
+        {
+          "at": 0,
+          "start": 0,
+          "end": 2097151,
+          "kind": "video"
+        },
+        {
+          "at": 2003,
+          "start": 2097152,
+          "end": 4194303,
+          "kind": "video"
+        },
+        {
+          "at": 4007,
+          "start": 4194304,
+          "end": 6291455,
+          "kind": "video"
+        },
+        {
+          "at": 6011,
+          "start": 6291456,
+          "end": 8388607,
+          "kind": "video"
+        },
+        {
+          "at": 8017,
+          "start": 8388608,
+          "end": 10485759,
+          "kind": "video"
+        },
+        {
+          "at": 10037,
+          "start": 10485760,
+          "end": 12582911,
+          "kind": "video"
+        }
+      ],
+      "fileSize": 16777216
+    },
+    {
+      "name": "a fruitless step up is taken back",
+      "settings": {
+        "concurrency": 8,
+        "autoConcurrency": true
+      },
+      "fileSize": 209715200,
+      "network": {
+        "default": {
+          "headMs": 61,
+          "chunkBytes": 16384,
+          "chunkMs": 37
+        },
+        "requests": [
+          {
+            "host": "*",
+            "fromNth": 30,
+            "chunkMs": 60
+          }
+        ]
+      },
+      "signals": [
+        {
+          "at": 2000,
+          "stall": true
+        },
+        {
+          "at": 4600,
+          "stall": true
+        }
+      ],
+      "runMs": 45000,
+      "calls": [
+        {
+          "at": 0,
+          "start": 0,
+          "end": 1048575,
+          "kind": "video"
+        },
+        {
+          "at": 300,
+          "start": 1048576,
+          "end": 2097151,
+          "kind": "video"
+        },
+        {
+          "at": 600,
+          "start": 2097152,
+          "end": 3145727,
+          "kind": "video"
+        },
+        {
+          "at": 900,
+          "start": 3145728,
+          "end": 4194303,
+          "kind": "video"
+        },
+        {
+          "at": 1200,
+          "start": 4194304,
+          "end": 5242879,
+          "kind": "video"
+        },
+        {
+          "at": 1500,
+          "start": 5242880,
+          "end": 6291455,
+          "kind": "video"
+        },
+        {
+          "at": 1800,
+          "start": 6291456,
+          "end": 7340031,
+          "kind": "video"
+        },
+        {
+          "at": 2100,
+          "start": 7340032,
+          "end": 8388607,
+          "kind": "video"
+        },
+        {
+          "at": 2400,
+          "start": 8388608,
+          "end": 9437183,
+          "kind": "video"
+        },
+        {
+          "at": 2700,
+          "start": 9437184,
+          "end": 10485759,
+          "kind": "video"
+        },
+        {
+          "at": 3000,
+          "start": 10485760,
+          "end": 11534335,
+          "kind": "video"
+        },
+        {
+          "at": 3300,
+          "start": 11534336,
+          "end": 12582911,
+          "kind": "video"
+        },
+        {
+          "at": 3600,
+          "start": 12582912,
+          "end": 13631487,
+          "kind": "video"
+        },
+        {
+          "at": 3900,
+          "start": 13631488,
+          "end": 14680063,
+          "kind": "video"
+        },
+        {
+          "at": 4200,
+          "start": 14680064,
+          "end": 15728639,
+          "kind": "video"
+        },
+        {
+          "at": 4500,
+          "start": 15728640,
+          "end": 16777215,
+          "kind": "video"
+        },
+        {
+          "at": 4800,
+          "start": 16777216,
+          "end": 17825791,
+          "kind": "video"
+        },
+        {
+          "at": 5100,
+          "start": 17825792,
+          "end": 18874367,
+          "kind": "video"
+        },
+        {
+          "at": 5400,
+          "start": 18874368,
+          "end": 19922943,
+          "kind": "video"
+        },
+        {
+          "at": 5700,
+          "start": 19922944,
+          "end": 20971519,
+          "kind": "video"
+        },
+        {
+          "at": 6000,
+          "start": 20971520,
+          "end": 22020095,
+          "kind": "video"
+        },
+        {
+          "at": 6300,
+          "start": 22020096,
+          "end": 23068671,
+          "kind": "video"
+        },
+        {
+          "at": 6600,
+          "start": 23068672,
+          "end": 24117247,
+          "kind": "video"
+        },
+        {
+          "at": 6900,
+          "start": 24117248,
+          "end": 25165823,
+          "kind": "video"
+        },
+        {
+          "at": 7200,
+          "start": 25165824,
+          "end": 26214399,
+          "kind": "video"
+        },
+        {
+          "at": 7500,
+          "start": 26214400,
+          "end": 27262975,
+          "kind": "video"
+        },
+        {
+          "at": 7800,
+          "start": 27262976,
+          "end": 28311551,
+          "kind": "video"
+        },
+        {
+          "at": 8100,
+          "start": 28311552,
+          "end": 29360127,
+          "kind": "video"
+        },
+        {
+          "at": 8400,
+          "start": 29360128,
+          "end": 30408703,
+          "kind": "video"
+        },
+        {
+          "at": 8700,
+          "start": 30408704,
+          "end": 31457279,
+          "kind": "video"
+        },
+        {
+          "at": 9000,
+          "start": 31457280,
+          "end": 32505855,
+          "kind": "video"
+        },
+        {
+          "at": 9300,
+          "start": 32505856,
+          "end": 33554431,
+          "kind": "video"
+        },
+        {
+          "at": 9600,
+          "start": 33554432,
+          "end": 34603007,
+          "kind": "video"
+        },
+        {
+          "at": 9900,
+          "start": 34603008,
+          "end": 35651583,
+          "kind": "video"
+        },
+        {
+          "at": 10200,
+          "start": 35651584,
+          "end": 36700159,
+          "kind": "video"
+        },
+        {
+          "at": 10500,
+          "start": 36700160,
+          "end": 37748735,
+          "kind": "video"
+        },
+        {
+          "at": 10800,
+          "start": 37748736,
+          "end": 38797311,
+          "kind": "video"
+        },
+        {
+          "at": 11100,
+          "start": 38797312,
+          "end": 39845887,
+          "kind": "video"
+        },
+        {
+          "at": 11400,
+          "start": 39845888,
+          "end": 40894463,
+          "kind": "video"
+        },
+        {
+          "at": 11700,
+          "start": 40894464,
+          "end": 41943039,
+          "kind": "video"
+        },
+        {
+          "at": 12000,
+          "start": 41943040,
+          "end": 42991615,
+          "kind": "video"
+        },
+        {
+          "at": 12300,
+          "start": 42991616,
+          "end": 44040191,
+          "kind": "video"
+        },
+        {
+          "at": 12600,
+          "start": 44040192,
+          "end": 45088767,
+          "kind": "video"
+        },
+        {
+          "at": 12900,
+          "start": 45088768,
+          "end": 46137343,
+          "kind": "video"
+        },
+        {
+          "at": 13200,
+          "start": 46137344,
+          "end": 47185919,
+          "kind": "video"
+        },
+        {
+          "at": 13500,
+          "start": 47185920,
+          "end": 48234495,
+          "kind": "video"
+        },
+        {
+          "at": 13800,
+          "start": 48234496,
+          "end": 49283071,
+          "kind": "video"
+        },
+        {
+          "at": 14100,
+          "start": 49283072,
+          "end": 50331647,
+          "kind": "video"
+        },
+        {
+          "at": 14400,
+          "start": 50331648,
+          "end": 51380223,
+          "kind": "video"
+        },
+        {
+          "at": 14700,
+          "start": 51380224,
+          "end": 52428799,
+          "kind": "video"
+        },
+        {
+          "at": 15000,
+          "start": 52428800,
+          "end": 53477375,
+          "kind": "video"
+        },
+        {
+          "at": 15300,
+          "start": 53477376,
+          "end": 54525951,
+          "kind": "video"
+        },
+        {
+          "at": 15600,
+          "start": 54525952,
+          "end": 55574527,
+          "kind": "video"
+        },
+        {
+          "at": 15900,
+          "start": 55574528,
+          "end": 56623103,
+          "kind": "video"
+        },
+        {
+          "at": 16200,
+          "start": 56623104,
+          "end": 57671679,
+          "kind": "video"
+        },
+        {
+          "at": 16500,
+          "start": 57671680,
+          "end": 58720255,
+          "kind": "video"
+        },
+        {
+          "at": 16800,
+          "start": 58720256,
+          "end": 59768831,
+          "kind": "video"
+        },
+        {
+          "at": 17100,
+          "start": 59768832,
+          "end": 60817407,
+          "kind": "video"
+        },
+        {
+          "at": 17400,
+          "start": 60817408,
+          "end": 61865983,
+          "kind": "video"
+        },
+        {
+          "at": 17700,
+          "start": 61865984,
+          "end": 62914559,
+          "kind": "video"
+        },
+        {
+          "at": 18000,
+          "start": 62914560,
+          "end": 63963135,
+          "kind": "video"
+        },
+        {
+          "at": 18300,
+          "start": 63963136,
+          "end": 65011711,
+          "kind": "video"
+        },
+        {
+          "at": 18600,
+          "start": 65011712,
+          "end": 66060287,
+          "kind": "video"
+        },
+        {
+          "at": 18900,
+          "start": 66060288,
+          "end": 67108863,
+          "kind": "video"
+        },
+        {
+          "at": 19200,
+          "start": 67108864,
+          "end": 68157439,
+          "kind": "video"
+        },
+        {
+          "at": 19500,
+          "start": 68157440,
+          "end": 69206015,
+          "kind": "video"
+        },
+        {
+          "at": 19800,
+          "start": 69206016,
+          "end": 70254591,
+          "kind": "video"
+        },
+        {
+          "at": 20100,
+          "start": 70254592,
+          "end": 71303167,
+          "kind": "video"
+        },
+        {
+          "at": 20400,
+          "start": 71303168,
+          "end": 72351743,
+          "kind": "video"
+        },
+        {
+          "at": 20700,
+          "start": 72351744,
+          "end": 73400319,
+          "kind": "video"
+        },
+        {
+          "at": 21000,
+          "start": 73400320,
+          "end": 74448895,
+          "kind": "video"
+        },
+        {
+          "at": 21300,
+          "start": 74448896,
+          "end": 75497471,
+          "kind": "video"
+        },
+        {
+          "at": 21600,
+          "start": 75497472,
+          "end": 76546047,
+          "kind": "video"
+        }
+      ]
+    },
+    {
+      "name": "custom nodes: warm-up, startup candidates and a slow pick",
+      "mode": "custom",
+      "customHosts": [
+        "upos-sz-mirrorcos.bilivideo.com",
+        "upos-sz-mirrorhw.bilivideo.com",
+        "upos-sz-mirrorbos.bilivideo.com",
+        "cn-hk-eq-01-03.bilivideo.com",
+        "upos-sz-mirror08c.bilivideo.com",
+        "upos-sz-mirrorbd.bilivideo.com",
+        "upos-sz-mirror14b.bilivideo.com"
+      ],
+      "fileSize": 16777216,
+      "network": {
+        "hosts": {
+          "upos-sz-mirrorbos.bilivideo.com": {
+            "chunkMs": 61
+          },
+          "upos-sz-mirror14b.bilivideo.com": {
+            "status": 403
+          }
+        }
+      },
+      "calls": [
+        {
+          "at": 0,
+          "start": 0,
+          "end": 4095,
+          "kind": "meta"
+        },
+        {
+          "at": 509,
+          "start": 4096,
+          "end": 2101247,
+          "kind": "video",
+          "startup": true
+        },
+        {
+          "at": 3001,
+          "start": 2101248,
+          "end": 3149823,
+          "kind": "video"
+        },
+        {
+          "at": 5004,
+          "start": 3149824,
+          "end": 4198399,
+          "kind": "video"
+        },
+        {
+          "at": 7007,
+          "start": 4198400,
+          "end": 5246975,
+          "kind": "video"
+        },
+        {
+          "at": 9010,
+          "start": 5246976,
+          "end": 6295551,
+          "kind": "video"
+        },
+        {
+          "at": 11013,
+          "start": 6295552,
+          "end": 7344127,
+          "kind": "video"
+        },
+        {
+          "at": 13016,
+          "start": 7344128,
+          "end": 8392703,
+          "kind": "video"
+        }
+      ]
+    }
+  ]
+}

@@ -49,6 +49,20 @@ class RipperAutoConcurrency {
     _pressureSince = 0;
     _trial = trial;
     onChanged?.call();
+    for (final listener in List.of(_listeners)) {
+      try {
+        listener();
+      } catch (_) {}
+    }
+  }
+
+  final _listeners = <void Function()>{};
+
+  /// Upstream `subscribe`: called whenever the thread count changes. Returns
+  /// the unsubscribe function.
+  void Function() subscribe(void Function() listener) {
+    _listeners.add(listener);
+    return () => _listeners.remove(listener);
   }
 
   bool _stepUp(bool strong) {

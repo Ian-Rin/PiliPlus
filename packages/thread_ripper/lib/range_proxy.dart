@@ -144,11 +144,10 @@ class RipperRangeProxy {
       RipperCdnResolver(
         urls,
         bans: _bans,
-        overseas:
-            overseas ||
-            customHosts.any(
-              (host) => RipperCdnResolver.normalizeHost(host) != null,
-            ),
+        overseas: overseas,
+        custom: customHosts.any(
+          (host) => RipperCdnResolver.normalizeHost(host) != null,
+        ),
         originals: originals,
       ),
       isAudio,

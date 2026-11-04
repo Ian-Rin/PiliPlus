@@ -5,6 +5,8 @@ import 'dart:math';
 import 'dart:typed_data';
 
 import 'package:test/test.dart';
+import 'package:thread_ripper/btr/downloader.dart';
+import 'package:thread_ripper/btr/resolver.dart';
 import 'package:thread_ripper/auto_concurrency.dart';
 import 'package:thread_ripper/cdn_resolver.dart';
 import 'package:thread_ripper/range_proxy.dart';
@@ -94,15 +96,18 @@ void main() {
           ...List<String>.from(rep['backupUrl']),
         ];
         final overseas = fixture['mode'] == 'overseas';
+        final customHosts = List<String>.from(fixture['customHosts']);
         final urls = RipperCdnResolver.candidates(
           originals,
           overseas: overseas,
+          customHosts: customHosts,
         );
         expect(urls.map((u) => u.toString()).toList(), fixture['urls']);
         final resolver = RipperCdnResolver(
           urls,
           originals: originals.map(Uri.parse).toList(),
           overseas: overseas,
+          custom: customHosts.isNotEmpty,
           now: () => now,
         );
         for (final step in fixture['steps']) {
@@ -173,6 +178,37 @@ void main() {
       }
     },
   );
+
+  test('downloader assignPrimaries matches upstream assignments', () {
+    final fixtures = jsonDecode(
+      File('test/fixtures/ripper_assignments.json').readAsStringSync(),
+    ) as List;
+    final downloader = RipperDownloader(
+      fetch: (_, _) => throw UnimplementedError(),
+      getSettings: () => const RipperDownloadSettings(),
+    );
+    for (final fixture in fixtures) {
+      final urls = (fixture['urls'] as List)
+          .cast<String>()
+          .map(Uri.parse)
+          .toList();
+      final speeds = {
+        for (var i = 0; i < urls.length; i++)
+          urls[i]: (fixture['speeds'][i] as num).toDouble(),
+      };
+      final resolver = _SpeedResolver(speeds);
+      for (final step in fixture['steps']) {
+        expect(
+          downloader
+              .assignPrimaries(urls, resolver, step['count'])
+              .map((u) => u.toString())
+              .toList(),
+          step['expected'],
+        );
+      }
+    }
+    downloader.dispose();
+  });
 
   test('weighted assignments match upstream including sparse exploration', () {
     final fixtures = jsonDecode(
@@ -726,4 +762,17 @@ class _CountingAuto extends RipperAutoConcurrency {
     sessions++;
     super.newSession();
   }
+}
+
+/// Only the measured speeds, for assignPrimaries.
+class _SpeedResolver implements RipperResolver {
+  _SpeedResolver(this.speeds);
+
+  final Map<Uri, double> speeds;
+
+  @override
+  double speed(Uri url) => speeds[url] ?? 0;
+
+  @override
+  Never noSuchMethod(Invocation invocation) => throw UnimplementedError();
 }

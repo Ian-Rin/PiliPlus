@@ -16,10 +16,15 @@ const representation = {
   backupUrl: ['https://upos-sz-mirroraliov.bilivideo.com/v.m4s?sign=a%2Bb'],
 };
 const fixtures = [];
-for (const mode of ['overseas','mainland']) {
+// The custom mode keeps to the picked servers: more of them than a segment uses, so its
+// warm-up and its startup candidates show.
+const picked = ['upos-sz-mirrorcos.bilivideo.com', 'upos-sz-mirrorhw.bilivideo.com', 'upos-sz-mirrorbos.bilivideo.com',
+  'cn-hk-eq-01-03.bilivideo.com', 'upos-sz-mirror08c.bilivideo.com', 'upos-sz-mirrorbd.bilivideo.com',
+  'upos-sz-mirror14b.bilivideo.com'];
+for (const [mode, customHosts] of [['overseas', []], ['mainland', []], ['custom', picked]]) {
   const bans = factory.createBanList();
-  const resolver = factory.createResolver(representation, () => mode, bans);
-  const urls = factory.representationUrls(representation, mode);
+  const resolver = factory.createResolver(representation, () => mode, bans, () => customHosts);
+  const urls = factory.representationUrls(representation, mode, customHosts);
   const steps = [];
   function record(op, args=[]) {
     const result = resolver[op](...args);
@@ -43,7 +48,7 @@ for (const mode of ['overseas','mainland']) {
   now += 90001;
   record('speed', [urls.at(-1)]);
   record('rangeCandidates');
-  fixtures.push({mode, representation, urls, steps});
+  fixtures.push({mode, customHosts, representation, urls, steps});
 }
 fs.writeFileSync(out('ripper_resolver.json'), JSON.stringify(fixtures,null,2)+'\n');
 
@@ -90,7 +95,9 @@ if (!source.includes(marker)) throw new Error('Upstream downloader shape changed
 vm.runInThisContext(source.replace(marker, 'return { assignPrimaries };'));
 const downloader = globalThis.__BILI_IDM_DOWNLOADER_FACTORY__.createDownloader({getSettings:()=>({concurrency:8})});
 const weighted = [];
-for (const speeds of [[0,0,0,0], [1200000,600000,10000,0], [900000,300000,0,0], [100000,100000,100000,100000]]) {
+// The last two put nodes between a twelfth and a tenth of the fastest (still assigned).
+for (const speeds of [[0,0,0,0], [1200000,600000,10000,0], [900000,300000,0,0], [100000,100000,100000,100000],
+  [1100000,100000,0,500000], [1200000,110000,105000,0,0]]) {
   const urls = speeds.map((_,i)=>`https://node${i}.bilivideo.com/v.m4s`);
   const resolver = {speed: url => speeds[urls.indexOf(url)]};
   const steps = [2,2,2,2,8,16].map(count=>({count,expected:downloader.assignPrimaries(urls,resolver,count)}));

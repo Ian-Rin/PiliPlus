@@ -118,6 +118,7 @@ class RipperCdnResolver {
     this.urls, {
     RipperBanList? bans,
     this.overseas = true,
+    this.custom = false,
     List<Uri>? originals,
     DateTime Function()? now,
   }) : bans = bans ?? RipperBanList(),
@@ -128,6 +129,9 @@ class RipperCdnResolver {
   final List<Uri> urls;
   final List<Uri> originals;
   final bool overseas;
+
+  /// Custom nodes picked in the settings (upstream's "custom" mode).
+  final bool custom;
   final _health = <Uri, _Health>{};
   final _routes = <String, _Measurement>{};
   static String _route(Uri url) => '${url.authority}${url.path}';
@@ -148,6 +152,10 @@ class RipperCdnResolver {
     final allowed = list.where(bans.allows).toList();
     return allowed.isEmpty ? list.toList() : allowed;
   }
+
+  /// Upstream `urls()`: the list without banned entries, or all of it when
+  /// everything is banned.
+  List<Uri> unbannedUrls() => _unbanned(urls);
 
   bool _available(Uri url) =>
       !(_health[url]?.blockedUntil.isAfter(now()) ?? false);
@@ -180,7 +188,10 @@ class RipperCdnResolver {
     if (pool.isEmpty) return _unbanned(urls);
     final width = _rangeCount == 0 ? pool.length : min(pool.length, 6);
     late List<Uri> selected;
-    if (_rangeCount < (overseas ? 4 : 1)) {
+    // Upstream warms up one range in the mainland mode and four otherwise,
+    // the custom mode included.
+    final mainland = !overseas && !custom;
+    if (_rangeCount < (mainland ? 1 : 4)) {
       selected = pool.take(width).toList();
       _rangeCursor = width % pool.length;
     } else {
@@ -202,8 +213,10 @@ class RipperCdnResolver {
     return selected;
   }
 
+  // The first request also races the addresses Bilibili handed out, except in
+  // the custom mode, which keeps to the picked servers.
   List<Uri> startupCandidates() =>
-      _unbanned({...originals, ...urls}.toList())
+      _unbanned({if (!custom) ...originals, ...urls}.toList())
           .where(_available)
           .take(8)
           .toList();

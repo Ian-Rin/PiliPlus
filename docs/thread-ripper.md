@@ -83,9 +83,46 @@ MIT 版权声明见 [许可证](licenses/bilibili-thread-ripper.txt)。
 测试使用本地 HTTP 服务模拟正常、慢、拒绝、错误 Range、截断、资源大小变化、取消、
 客户端断开和新请求取代旧请求。
 
+## 逐行移植的下载器（`packages/thread_ripper/lib/btr/`）
+
+`range_proxy.dart` 的下载调度是按原版思路重写的，不是逐行移植。`lib/btr/` 是原版 `idm-downloader.js`
+（2026.11.3.1）的逐行移植，函数、常量、注释和顺序都跟原版一致，原版的一处 diff 可以直接对到这里：
+
+- `downloader.dart`：`Semaphore`、`createDownloader` 的全部内容（分块、对冲副本、续传前缀、重试轮次、
+  起播探测、截止时间与排队优先级、任务分配、按序交付）。时钟由外部注入，对应原版的 `performance.now()`。
+- `errors.dart`：原版依赖的浏览器原语，按原版用到的语义实现：`DOMException`（按名字区分 AbortError/TimeoutError，带 HTTP 状态）、
+  `AbortController`、`Promise.any`（`AggregateError` 保持尝试顺序）。
+- `fetch.dart`：`fetch` 和响应体 reader 的形状与浏览器相同，`readBody` 因此可以逐行照搬。
+- `range_core.dart`：`parseContentRange`、`splitRange`、`concatChunks`。
+- `resolver.dart`：原版下载器对 resolver 的接口约定；`RipperCdnResolverAdapter` 把 `RipperCdnResolver`
+  （连同封禁名单）接到这个约定上。
+
+自动线程数仍用 `auto_concurrency.dart`，新增 `subscribe`，每个下载器像原版一样订阅线程数变化。
+目前 App 仍走 `range_proxy.dart`；mpv 适配层改用 `lib/btr/` 是下一步。
+
+### 下载器对照测试
+
+`test/fixtures/btr_scenarios.json` 是一组模拟网络剧本：每个节点的响应头耗时、每块大小和间隔，
+某个节点或某个请求返回错误状态、中途停住、提前断开、`Content-Range` 不对、网络错误，
+以及什么时候调用 `downloadRange`、什么时候取消、播放器什么时候报告卡顿和缓冲。
+`tool/generate_btr_traces.cjs` 把原版三个文件加载进 Node 的 `vm` 沙盒，替换掉定时器和时钟，在虚拟时间上跑完每个剧本，
+记录每个请求的发出与取消（时间、节点、字节区间、原因）、交给调用方的每一块、自动线程数的变化和最终结果，
+写入 `btr_traces.json`；`test/btr_downloader_trace_test.dart` 用 `fake_async` 在同样的规则下跑 Dart 移植，要求逐条相同
+（同一毫秒内的事件不比较先后）。两边的模拟网络规则写在 `generate_btr_traces.cjs` 开头和 `test/btr_harness.dart`，改动时要同步。
+
+模拟网络返回的 Promise 必须来自沙盒自己：`await` 别的环境的 Promise 会多两次微任务，改变原版自己的执行顺序
+（例如起播探测的输家是否赶在任务分配之前记下测速）。浏览器里的 `fetch` 返回的都是页面自己的 Promise。
+
+更新：`node packages/thread_ripper/tool/generate_btr_traces.cjs <上游源码目录>`。
+试新剧本：把 `btr_scenarios.json` 放到别的目录，设 `BTR_FIXTURES=<目录>` 后运行生成脚本和 `dart test test/btr_downloader_trace_test.dart`。
+
+覆盖情况：逐个改动下载器里的 20 处（常量、规则、上报），其中 17 处会让对照测试失败（含 `assignPrimaries` 的对照数据）。
+未覆盖的 3 处都只在调用方给出播放截止时间时才执行：排队紧迫度的档位、「副本节点快 1.5 倍就复制」、落后判定的 250 ms 阈值。
+原生播放器和原版兼容模式一样不给截止时间。搜索过程中试过的 117 个随机剧本（含过载到分块饿死的情况）在未改动时全部与原版一致。
+
 ## 与原版的对照验证
 
-`packages/thread_ripper/test/fixtures/ripper_resolver.json` 由原版 JavaScript 直接产生，覆盖两种地区的
+`packages/thread_ripper/test/fixtures/ripper_resolver.json` 由原版 JavaScript 直接产生，覆盖三种模式的
 候选生成、预热、成功/失败后的排序、采样过期和轮换；Dart 测试逐步核对这些结果。
 `ripper_candidates.json` 对照原版 `representationUrls`：普通、Akamai、三种中继、对等端口、重复和非媒体地址，
 各在海外、大陆、自定义三种模式下的候选列表。`ripper_assignments.json` 对照原版任务分配，`ripper_auto.json` 分场景对照自动并发试升/回退/限流/缓冲压力和起播加速。
@@ -157,3 +194,8 @@ mpv 日志先报 `Audio device underrun` 再进入缓冲，与 issue 描述一�
 2026-11-04：同步上游 2026.11.3.1。对照数据由上游 `e409a42cb` 重新生成，只有 `ripper_resolver.json` 变化（大陆模式多了 `mirrorcoso1`）；
 新增 `ripper_candidates.json`（10 种地址组合 × 3 种模式，共 30 项）覆盖中继修复。在 `packages/thread_ripper` 下 `dart test` 共 40 项通过，
 `dart analyze` 无问题。逐条删去移植的改动（中继兜底、只用普通地址合成、三条中继判断规则各一、`mirrorcoso1`）共 7 处，每一处都会让对照测试失败。
+
+2026-11-04：逐行移植原版 `idm-downloader.js`（2026.11.3.1）到 `packages/thread_ripper/lib/btr/`，37 个模拟网络剧本的完整事件记录与原版一致。
+自定义节点模式与原版对齐两处：预热按原版用 4 轮（之前通过把 `overseas` 设为真间接做到），起播探测不再加入 B 站给的原始地址
+（原版如此，本文档「自定义节点」一条也是这样写的，但之前的代码仍会加入）。`ripper_resolver.json` 新增自定义模式的对照记录，
+`ripper_assignments.json` 新增介于最快节点十二分之一与十分之一之间的节点。`dart test` 共 79 项通过，`dart analyze` 无问题。
