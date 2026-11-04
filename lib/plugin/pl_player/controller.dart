@@ -726,25 +726,31 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     if (state != .resumed) return;
     final since = _backgroundSince;
     _backgroundSince = null;
+    final trace = _bgTrace;
+    // On every return, however short the time away (a cheap self-connect):
+    // before mpv has played what it buffered and asks the proxy for more.
+    if (since != null) {
+      if (_ripperProxy case final proxy?) {
+        proxy.revive().then((revival) {
+          trace?.mark(switch (revival) {
+            ProxyRevival.alive => '加速代理正常',
+            ProxyRevival.relistened => '加速代理的端口被系统收回，已在原端口重新监听',
+            ProxyRevival.failed => '加速代理恢复失败（之后断流会换新代理重新加载）',
+          });
+          // Worth a log entry however short the time away.
+          if (revival != ProxyRevival.alive && trace != null && !trace.done) {
+            _reportBackgroundLater(const Duration(seconds: 6));
+          }
+        });
+      }
+    }
     final away = since == null ? null : DateTime.now().difference(since);
     if (away == null || player == null || away < const Duration(seconds: 2)) {
-      _bgTrace = null;
       return;
     }
-    _bgTrace?.mark(
+    trace?.mark(
       '回到前台，离开 ${away.inSeconds}s ${_videoState(player)}',
     );
-    // Before mpv has played what it buffered and asks the proxy for more.
-    if (_ripperProxy case final proxy?) {
-      final trace = _bgTrace;
-      proxy.revive().then((revival) {
-        trace?.mark(switch (revival) {
-          ProxyRevival.alive => '加速代理正常',
-          ProxyRevival.relistened => '加速代理的端口被系统收回，已在原端口重新监听',
-          ProxyRevival.failed => '加速代理恢复失败（之后断流会换新代理重新加载）',
-        });
-      });
-    }
     _sampleLater(player, const Duration(seconds: 1), '回来 1 秒');
     _sampleLater(player, const Duration(seconds: 3), '回来 3 秒');
     if (player.state.playing) {
