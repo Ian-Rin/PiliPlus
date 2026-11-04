@@ -651,9 +651,9 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
 
   DateTime? _backgroundSince;
 
-  // Back from the background, paused: the next start of playback gets the
-  // nudge (see [onAppLifecycle]).
-  bool _nudgeOnPlay = false;
+  // Back from the background, paused: the next start of playback is traced
+  // too (see [onAppLifecycle]).
+  bool _traceNextPlay = false;
 
   _BackgroundTrace? _bgTrace;
 
@@ -678,7 +678,8 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
         '解码帧 ${read('estimated-frame-number')} '
         '丢帧 ${read('frame-drop-count')}/${read('decoder-frame-drop-count')} '
         '延迟帧 ${read('vo-delayed-frame-count')} '
-        'vo ${read('vo-configured')}';
+        'vo ${read('vo-configured')} '
+        '解码器 ${read('hwdec-current')}';
   }
 
   void _sampleLater(Player player, Duration after, String label) {
@@ -699,16 +700,10 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     });
   }
 
-  /// iOS stops an app drawing while it is in the background. Back in the
-  /// foreground, the picture can stay on its last frame while the sound plays,
-  /// whether the video played on in the background or is started again (a
-  /// double tap); a pause and a resume set it going with the sound. That is
-  /// done here once after more than two seconds away: at once for a video
-  /// still playing, else at its next start.
-  ///
-  /// Each such trip is logged too ([_bgTrace]), mpv's video state before and
-  /// after the pause and resume: to find out why the picture stops, rather
-  /// than only setting it going again.
+  /// Back in the foreground (iOS): the proxy checked on every return (its
+  /// socket may have been taken back), the hardware decoder rebuilt after
+  /// more than two seconds away ([_reseedDecoder]), and the trip logged
+  /// ([_bgTrace]) with mpv's video state at a few moments.
   void onAppLifecycle(AppLifecycleState state) {
     if (!Platform.isIOS) return;
     final player = _videoPlayerController;
@@ -751,31 +746,48 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     trace?.mark(
       '回到前台，离开 ${away.inSeconds}s ${_videoState(player)}',
     );
+    _reseedDecoder(player);
     _sampleLater(player, const Duration(seconds: 1), '回来 1 秒');
     _sampleLater(player, const Duration(seconds: 3), '回来 3 秒');
     if (player.state.playing) {
-      _nudgePicture(player);
-      _sampleLater(player, const Duration(milliseconds: 1500), '自动暂停继续后');
       _reportBackgroundLater(const Duration(seconds: 6));
     } else {
-      _nudgeOnPlay = true;
+      _traceNextPlay = true;
       // Logged once the video starts again (see the playing listener), or
       // after two minutes if it does not.
       _reportBackgroundLater(const Duration(minutes: 2));
     }
   }
 
-  void _nudgePicture(Player player, {Duration after = Duration.zero}) {
-    if (onlyPlayAudio.value) return;
+  /// iOS invalidates the hardware decoder sessions (VideoToolbox) of an app
+  /// in the background. Back in the foreground the decoder gave no pictures:
+  /// the log of such a trip showed playback started, data arriving, and the
+  /// playhead and A-V sync standing still (the default display-resample
+  /// sync moves the playhead with the picture; audio sync plays the sound on
+  /// under a still picture). A pause and resume changed nothing.
+  /// A change of hwdec has mpv build a new decoder (through software decoding
+  /// for a moment, as two quick changes could be taken as none), and a seek
+  /// to where playback is starts it on a keyframe, from the cache.
+  void _reseedDecoder(Player player) {
+    final hw = hwdec;
+    if (onlyPlayAudio.value || hw == null || hw == 'no') return;
     () async {
-      await Future<void>.delayed(after);
       bool current() =>
           identical(_videoPlayerController, player) && _playerCount != 0;
-      if (!current() || !player.state.playing) return;
-      _bgTrace?.mark('自动暂停再继续');
-      await player.pause();
-      await Future<void>.delayed(const Duration(milliseconds: 100));
-      if (current()) await player.play();
+      final at = player.state.position;
+      _bgTrace?.mark(
+        '重建硬件解码器，从 ${(at.inMilliseconds / 1000).toStringAsFixed(1)}s 前的关键帧重新解码',
+      );
+      try {
+        player.setProperty('hwdec', 'no');
+        await Future<void>.delayed(const Duration(milliseconds: 300));
+        if (!current()) return;
+        player.setProperty('hwdec', hw);
+      } catch (_) {
+        return;
+      }
+      _appMovesPlayhead(at);
+      await player.seek(at);
     }();
   }
 
@@ -907,8 +919,8 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     try {
       _processing = true;
       final trace = _startup = _StartupTrace();
-      // A new video starts with a picture of its own.
-      _nudgeOnPlay = false;
+      // A new video is not the one that was in the background.
+      _traceNextPlay = false;
       // A start that never comes (loading forever) is logged too, with how
       // far it got.
       if (autoplay) {
@@ -1457,21 +1469,11 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
         if (playing) {
           _startup?.mark('开始播放', once: 'playing');
           _bgTrace?.mark('开始播放');
-          if (_nudgeOnPlay) {
-            _nudgeOnPlay = false;
-            // A moment after the start, as a second pause and resume did.
+          if (_traceNextPlay) {
+            _traceNextPlay = false;
             if (_videoPlayerController case final player?) {
-              _sampleLater(
-                player,
-                const Duration(milliseconds: 250),
-                '开始播放 0.25 秒（自动处理前）',
-              );
-              _nudgePicture(player, after: const Duration(milliseconds: 300));
-              _sampleLater(
-                player,
-                const Duration(seconds: 2),
-                '开始播放 2 秒（自动处理后）',
-              );
+              _sampleLater(player, const Duration(seconds: 1), '开始播放 1 秒');
+              _sampleLater(player, const Duration(seconds: 3), '开始播放 3 秒');
               _reportBackgroundLater(const Duration(seconds: 4));
             }
           }
