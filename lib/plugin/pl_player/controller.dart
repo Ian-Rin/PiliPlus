@@ -633,11 +633,16 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
 
   DateTime? _backgroundSince;
 
-  /// iOS stops an app drawing while it is in the background. mpv plays on,
-  /// and back in the foreground the picture can stay on its last frame while
-  /// the sound goes on, until playback is paused and resumed (which sets the
-  /// picture going with the sound again). That is done here, once, for a
-  /// video that played on in the background for more than two seconds.
+  // Back from the background, paused: the next start of playback gets the
+  // nudge (see [onAppLifecycle]).
+  bool _nudgeOnPlay = false;
+
+  /// iOS stops an app drawing while it is in the background. Back in the
+  /// foreground, the picture can stay on its last frame while the sound plays,
+  /// whether the video played on in the background or is started again (a
+  /// double tap); a pause and a resume set it going with the sound. That is
+  /// done here once after more than two seconds away: at once for a video
+  /// still playing, else at its next start.
   void onAppLifecycle(AppLifecycleState state) {
     if (!Platform.isIOS) return;
     if (state == .paused) {
@@ -650,17 +655,26 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     final player = _videoPlayerController;
     if (since == null ||
         player == null ||
-        !player.state.playing ||
-        onlyPlayAudio.value ||
         DateTime.now().difference(since) < const Duration(seconds: 2)) {
       return;
     }
+    if (player.state.playing) {
+      _nudgePicture(player);
+    } else {
+      _nudgeOnPlay = true;
+    }
+  }
+
+  void _nudgePicture(Player player, {Duration after = Duration.zero}) {
+    if (onlyPlayAudio.value) return;
     () async {
+      await Future<void>.delayed(after);
+      bool current() =>
+          identical(_videoPlayerController, player) && _playerCount != 0;
+      if (!current() || !player.state.playing) return;
       await player.pause();
       await Future<void>.delayed(const Duration(milliseconds: 100));
-      if (identical(_videoPlayerController, player) && _playerCount != 0) {
-        await player.play();
-      }
+      if (current()) await player.play();
     }();
   }
 
@@ -792,6 +806,8 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     try {
       _processing = true;
       final trace = _startup = _StartupTrace();
+      // A new video starts with a picture of its own.
+      _nudgeOnPlay = false;
       // A start that never comes (loading forever) is logged too, with how
       // far it got.
       if (autoplay) {
@@ -1334,6 +1350,13 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
       stream.playing.listen((bool playing) {
         if (playing) {
           _startup?.mark('开始播放', once: 'playing');
+          if (_nudgeOnPlay) {
+            _nudgeOnPlay = false;
+            // A moment after the start, as a second pause and resume did.
+            if (_videoPlayerController case final player?) {
+              _nudgePicture(player, after: const Duration(milliseconds: 300));
+            }
+          }
           playerStatus = .playing;
           _stopWakeLockTimer();
           _updatePlaybackState();
