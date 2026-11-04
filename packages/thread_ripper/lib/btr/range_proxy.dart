@@ -21,6 +21,19 @@ import 'package:thread_ripper/btr/range_core.dart';
 import 'package:thread_ripper/btr/resolver.dart';
 import 'package:thread_ripper/cdn_resolver.dart';
 
+/// What [BtrRangeProxy.revive] found.
+enum ProxyRevival {
+  /// The server was taking connections.
+  alive,
+
+  /// It was not, and listens again on its port.
+  relistened,
+
+  /// It was not, and the port could not be had again (or the session is
+  /// closed).
+  failed,
+}
+
 class BtrRangeProxy {
   BtrRangeProxy({
     int concurrency = 8,
@@ -97,6 +110,7 @@ class BtrRangeProxy {
   /// while set. No addresses.
   void Function(String note)? onTrace;
   HttpServer? _server;
+  int? _port;
   final String _token = List.generate(
     24,
     (_) => Random.secure().nextInt(256).toRadixString(16).padLeft(2, '0'),
@@ -111,13 +125,68 @@ class BtrRangeProxy {
       await server.close(force: true);
       throw StateError('Download session closed');
     }
-    _server = server;
     // A new video is a new playback session.
     autoConcurrency?.newSession();
-    // A transport that goes away can also fail a close(); every request
-    // cleans up after itself, so none of that reaches the app's zone.
-    server.listen((request) => _serve(request).ignore());
+    _listen(server);
   }
+
+  void _listen(HttpServer server) {
+    _server = server;
+    _port = server.port;
+    // A transport that goes away can also fail a close(); every request
+    // cleans up after itself, so none of that reaches the app's zone. A
+    // listening socket taken back by the system ends the stream with an
+    // error: [revive] listens again.
+    server.listen(
+      (request) => _serve(request).ignore(),
+      onError: (Object _) {},
+    );
+  }
+
+  /// iOS may take back a suspended app's listening sockets (Apple TN2277).
+  /// Back in the foreground, mpv's connections to this server are refused,
+  /// and every retry of the same address fails, after mpv has played what it
+  /// had buffered. This checks that the server still takes connections and,
+  /// if it does not, listens again on the same port: the addresses mpv holds
+  /// go on working, with every track's state (its file length, nodes, bans).
+  /// [ProxyRevival.failed] when the port could not be had again; the caller
+  /// then reloads.
+  Future<ProxyRevival> revive() async {
+    final port = _port;
+    if (_closed || port == null) return ProxyRevival.failed;
+    if (await _accepts(port)) return ProxyRevival.alive;
+    final old = _server;
+    _server = null;
+    old?.close(force: true).then((_) {}, onError: (Object _) {});
+    try {
+      final server = await HttpServer.bind(InternetAddress.loopbackIPv4, port);
+      if (_closed) {
+        await server.close(force: true);
+        return ProxyRevival.failed;
+      }
+      _listen(server);
+      return ProxyRevival.relistened;
+    } catch (_) {
+      return ProxyRevival.failed;
+    }
+  }
+
+  static Future<bool> _accepts(int port) async {
+    try {
+      final socket = await Socket.connect(
+        InternetAddress.loopbackIPv4,
+        port,
+        timeout: const Duration(milliseconds: 500),
+      );
+      socket.destroy();
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// For tests: what iOS does to a suspended app's listening socket.
+  Future<void> debugDropListener() async => _server?.close(force: true);
 
   /// The loopback URL that serves the track whose addresses are [urls].
   String register(Iterable<String> urls, {bool isAudio = false}) {
@@ -159,7 +228,7 @@ class BtrRangeProxy {
       isAudio ? 'audio' : 'video',
     );
     if (prefetchHeads) _prefetchHead(track);
-    return 'http://127.0.0.1:${_server!.port}$id';
+    return 'http://127.0.0.1:$_port$id';
   }
 
   /// mpv opens an EDL's tracks one after the other: the audio only once the

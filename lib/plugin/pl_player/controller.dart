@@ -734,6 +734,17 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     _bgTrace?.mark(
       '回到前台，离开 ${away.inSeconds}s ${_videoState(player)}',
     );
+    // Before mpv has played what it buffered and asks the proxy for more.
+    if (_ripperProxy case final proxy?) {
+      final trace = _bgTrace;
+      proxy.revive().then((revival) {
+        trace?.mark(switch (revival) {
+          ProxyRevival.alive => '加速代理正常',
+          ProxyRevival.relistened => '加速代理的端口被系统收回，已在原端口重新监听',
+          ProxyRevival.failed => '加速代理恢复失败（之后断流会换新代理重新加载）',
+        });
+      });
+    }
     _sampleLater(player, const Duration(seconds: 1), '回来 1 秒');
     _sampleLater(player, const Duration(seconds: 3), '回来 3 秒');
     if (player.state.playing) {
@@ -1253,7 +1264,12 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     _appMovedAt = DateTime.now();
     _reportedPosition = to;
     _jumpToEnd = null;
+    _lastGoodPosition = to;
   }
+
+  /// Where playback last was. mpv's own position is 0 after a reopen that
+  /// failed, and a retry from there started the video over.
+  Duration _lastGoodPosition = Duration.zero;
 
   /// With keep-open, mpv that reaches the end of a stream with no frame on
   /// screen (the stream broke off while the app was in the background) first
@@ -1501,6 +1517,7 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
       /// position
       stream.position.listen((Duration position) {
         if (_holdJumpToEnd(player, position)) return;
+        if (position > Duration.zero) _lastGoodPosition = position;
         _traceStartup(position);
         _ripperProxy?.autoConcurrency?.buffer(
           // Seconds of playback left, not of media: at 2x the buffer lasts
@@ -1610,11 +1627,19 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
               //   debugPrint("_buffered.value: ${_buffered.value}");
               // }
               if (isBuffering.value && buffered.value == 0) {
-                SmartDialog.showToast(
-                  '视频链接打开失败，重试中',
-                  displayTime: const Duration(milliseconds: 500),
-                );
-                refreshPlayer();
+                // Reopening the same address failed again and again when it
+                // was the thread-ripper proxy's (its socket gone in the
+                // background), each time from position 0. Fresh addresses
+                // and a fresh proxy, from where playback was.
+                if (dataSource is FileSource) {
+                  SmartDialog.showToast(
+                    '视频链接打开失败，重试中',
+                    displayTime: const Duration(milliseconds: 500),
+                  );
+                  refreshPlayer();
+                } else {
+                  _recoverStream(_lastGoodPosition);
+                }
               }
             }),
           );

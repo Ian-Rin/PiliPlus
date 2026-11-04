@@ -587,9 +587,16 @@ void main() {
     proxy = BtrRangeProxy(concurrency: 4, userAgent: 'test');
     await proxy.start();
     final notes = <String>[];
-    proxy.onTrace = notes.add;
+    // The last note comes once the window is handed over, which can be just
+    // after the client has read the last byte.
+    final windowDone = Completer<void>();
+    proxy.onTrace = (note) {
+      notes.add(note);
+      if (note.contains('第一个窗口完成')) windowDone.complete();
+    };
     final url = register(['/good']);
     expect((await fetch(url)).$2, source);
+    await windowDone.future.timeout(const Duration(seconds: 5));
     expect(notes, [
       'video 开头已取到',
       'video 请求 整个文件',
@@ -598,6 +605,30 @@ void main() {
       'video 第一个窗口完成 1010 KiB',
     ]);
     expect(notes.any((note) => note.contains('127.0.0.1')), isFalse);
+  });
+
+  // iOS may take back a suspended app's listening socket (TN2277); mpv
+  // keeps the addresses it was given.
+  test('revive listens again on the same port, tracks intact', () async {
+    final url = register(['/good']);
+    expect((await fetch(url, range: 'bytes=0-99')).$2, source.sublist(0, 100));
+    expect(await proxy.revive(), ProxyRevival.alive);
+    await proxy.debugDropListener();
+    await expectLater(fetch(url, range: 'bytes=0-99'), throwsA(anything));
+    expect(await proxy.revive(), ProxyRevival.relistened);
+    expect(
+      (await fetch(url, range: 'bytes=100-199')).$2,
+      source.sublist(100, 200),
+    );
+    expect(
+      (await fetch(url, range: 'bytes=1099900-')).$2,
+      source.sublist(1099900),
+    );
+  });
+
+  test('a closed session does not come back', () async {
+    proxy.close();
+    expect(await proxy.revive(), ProxyRevival.failed);
   });
 
   test('a copy resumes the live first copy on a different node', () async {
