@@ -1,8 +1,8 @@
 # This fork's iOS build on macos-26: every push to main, and by hand.
 # - New code on main cancels the build still running for older code.
-# - A failed build is tried once more (GitHub's Macs can be out of capacity:
-#   the job then fails without ever being picked up). A build cancelled by
-#   newer code is not retried.
+# - A build that no Mac ever picked up (GitHub's Macs can be out of capacity
+#   for hours) is tried once more. One that failed on a Mac (the code) and one
+#   cancelled by newer code are not.
 # The ipa is the run's artifact (iOS-release), and a release: GitHub mails a
 # new release to the repository's watchers.
 name: Fork iOS build
@@ -28,7 +28,16 @@ jobs:
   build:
     name: Build
     runs-on: macos-26
+    outputs:
+      on-a-mac: ${{ steps.mac.outputs.on-a-mac }}
     steps:
+      # Set as soon as the job runs at all, so that the retry can tell a job
+      # no Mac picked up from one that failed on it.
+      - name: Note that a Mac picked up the job
+        id: mac
+        shell: bash
+        run: echo "on-a-mac=true" >> "$GITHUB_OUTPUT"
+
       - name: Checkout code
         uses: actions/checkout@v7
         with:
@@ -43,7 +52,7 @@ jobs:
     name: Retry
     needs: build
     # failure() is false for a build cancelled by newer code.
-    if: failure()
+    if: failure() && needs.build.outputs.on-a-mac != 'true'
     runs-on: macos-26
     steps:
       - name: Checkout code
