@@ -766,8 +766,9 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
           if (trace.done || !identical(_startup, trace) || _playerCount == 0) {
             return;
           }
-          trace.mark('15 秒内没有开始播放');
-          trace.done = true;
+          trace
+            ..mark('15 秒内没有开始播放')
+            ..done = true;
           Utils.reportError(trace.report);
         });
       }
