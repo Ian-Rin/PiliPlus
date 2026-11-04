@@ -123,4 +123,6 @@ echo "  rm -rf \"$ROOT\"      # 这个脚本下载和生成的一切"
 if [ "$INSTALLED_PODS" = 1 ]; then
   echo "  brew uninstall cocoapods      # 这次用 Homebrew 装的"
 fi
-echo "  Xcode 从「应用程序」里删除即可（如果是为这个项目装的）"
+echo "  Xcode（如果是为这个项目装的）：先运行 xcrun simctl runtime delete all 删掉 iOS 模拟器"
+echo "  （它们在 Xcode 外面，每个约 8 GB），再把 Xcode 拖进废纸篓，最后："
+echo "  rm -rf ~/Library/Developer/Xcode ~/Library/Developer/CoreSimulator ~/Library/Caches/com.apple.dt.Xcode"
