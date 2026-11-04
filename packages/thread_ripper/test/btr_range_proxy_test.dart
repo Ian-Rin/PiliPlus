@@ -581,6 +581,25 @@ void main() {
     expect(ahead, greaterThanOrEqualTo(piece));
   });
 
+  // The app logs a slow start's timeline (设置 → 日志).
+  test('onTrace notes a track\'s startup without addresses', () async {
+    proxy.close();
+    proxy = BtrRangeProxy(concurrency: 4, userAgent: 'test');
+    await proxy.start();
+    final notes = <String>[];
+    proxy.onTrace = notes.add;
+    final url = register(['/good']);
+    expect((await fetch(url)).$2, source);
+    expect(notes, [
+      'video 开头已取到',
+      'video 请求 整个文件',
+      'video 首批数据 64 KiB',
+      // Cut short by the end of the 1.1 MB file.
+      'video 第一个窗口完成 1010 KiB',
+    ]);
+    expect(notes.any((note) => note.contains('127.0.0.1')), isFalse);
+  });
+
   test('a copy resumes the live first copy on a different node', () async {
     final watch = Stopwatch()..start();
     final result = await fetch(register(['/resume-primary', '/resume-backup']));

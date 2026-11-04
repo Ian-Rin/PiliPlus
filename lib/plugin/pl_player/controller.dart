@@ -75,6 +75,32 @@ import 'package:window_manager/window_manager.dart';
 typedef PlayCallback = Future<void>? Function();
 typedef PlayOwner = ({String tag, Type? type});
 
+/// How a video got to its first moving picture (see
+/// [PlPlayerController._traceStartup]).
+class _StartupTrace {
+  final _clock = Stopwatch()..start();
+  final _notes = <String>[];
+  final _once = <String>{};
+  String label = '';
+  bool done = false;
+
+  int get elapsed => _clock.elapsedMilliseconds;
+
+  bool has(String key) => _once.contains(key);
+
+  void mark(String note, {String? once}) {
+    if (done) return;
+    if (elapsed > 30000) {
+      done = true;
+      return;
+    }
+    if (once != null && !_once.add(once)) return;
+    if (_notes.length < 40) _notes.add('${elapsed}ms $note');
+  }
+
+  String get report => '[起播耗时] $label，共 ${elapsed}ms\n${_notes.join('\n')}';
+}
+
 class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
   Player? _videoPlayerController;
   VideoController? _videoController;
@@ -732,6 +758,7 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
   }) async {
     try {
       _processing = true;
+      _startup = _StartupTrace();
       this.isLive = isLive;
       _videoType = videoType ?? VideoType.ugc;
       this.width = width;
@@ -1017,6 +1044,13 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
 
     assert(!isLive || seekTo == null);
     _appMovesPlayhead(seekTo ?? Duration.zero);
+    _ripperProxy?.onTrace = _startup?.mark;
+    _startup
+      ?..label =
+          '${_ripperProxy != null ? '线程撕裂者' : '直连'}'
+          '${seekTo != null && seekTo > Duration.zero ? '，从 ${seekTo.inSeconds} 秒开始' : ''}'
+          '${audioSource?.isNotEmpty == true ? '' : '，无单独音轨'}'
+      ..mark('mpv 开始打开');
     _ripperRestarting = true;
     await player.open(
       Media(
@@ -1035,6 +1069,22 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
   Future<void>? Function(Duration position)? onStreamBrokeOff;
 
   ({int position, DateTime at, int count})? _lastBreakOff;
+
+  _StartupTrace? _startup;
+
+  /// A start that took longer than 1.5 s goes to the in-app logs (设置 →
+  /// 日志) with its timeline, from the video being set to the playhead moving
+  /// with a picture: where a black start spends its time, without guessing.
+  void _traceStartup(Duration position) {
+    final trace = _startup;
+    if (trace == null || trace.done) return;
+    if (!trace.has('frame') || !trace.has('playing')) return;
+    trace
+      ..mark('画面开始走 ${position.inMilliseconds}ms')
+      ..done = true;
+    _ripperProxy?.onTrace = null;
+    if (trace.elapsed >= 1500) Utils.reportError(trace.report);
+  }
 
   // Tries at one place: a network that is still coming back (just back from
   // the background) gets a few seconds; a damaged file ends the third time.
@@ -1237,6 +1287,7 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
       /// playing
       stream.playing.listen((bool playing) {
         if (playing) {
+          _startup?.mark('开始播放', once: 'playing');
           playerStatus = .playing;
           _stopWakeLockTimer();
           _updatePlaybackState();
@@ -1284,6 +1335,7 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
       /// position
       stream.position.listen((Duration position) {
         if (_holdJumpToEnd(player, position)) return;
+        _traceStartup(position);
         _ripperProxy?.autoConcurrency?.buffer(
           (player.state.buffer - position).inMilliseconds / 1000,
           player.state.playing && !_ripperRestarting,
@@ -1308,6 +1360,14 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
           element(position);
         }
       }),
+      stream.videoParams.listen((VideoParams params) {
+        if (params.dw != null) {
+          _startup?.mark(
+            '解码出第一帧 ${params.dw}x${params.dh}',
+            once: 'frame',
+          );
+        }
+      }),
       stream.duration.listen((Duration duration) {
         updateDuration(duration);
         _updateIOSPip();
@@ -1316,6 +1376,7 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
         buffered.value = buffer.inSeconds;
       }),
       stream.buffering.listen((bool buffering) {
+        _startup?.mark(buffering ? '开始转圈' : '转圈结束');
         if (buffering &&
             !isBuffering.value &&
             !_ripperRestarting &&

@@ -92,6 +92,10 @@ class BtrRangeProxy {
   // only takes the connections the current one leaves free.
   static const _aheadPriority = 20;
   bool _closed = false;
+
+  /// Startup diagnostics: short notes on a track's requests and first bytes,
+  /// while set. No addresses.
+  void Function(String note)? onTrace;
   HttpServer? _server;
   final String _token = List.generate(
     24,
@@ -167,7 +171,13 @@ class BtrRangeProxy {
     final job = RipperAbortController();
     _jobs.add(job);
     track.headLoad = _probe(track, job.signal, fromStart: true)
-        .then<void>((bytes) => track.head = bytes, onError: (Object _) {})
+        .then<void>(
+          (bytes) {
+            track.head = bytes;
+            onTrace?.call('${track.kind} 开头已取到');
+          },
+          onError: (Object _) => onTrace?.call('${track.kind} 提前取开头失败'),
+        )
         .whenComplete(() => _jobs.remove(job));
   }
 
@@ -381,11 +391,17 @@ class BtrRangeProxy {
           autoConcurrency?.newSession();
         }
         track.opened = true;
+        onTrace?.call('${track.kind} 请求 ${header ?? '整个文件'}');
+        var traced = false;
         // Headers go out with the first bytes, so a request that fails before
         // any arrive is a 502, not a stream cut short.
         _handedOver[job] = null;
         Future<void> deliver(Uint8List bytes) async {
           if (!sentHeaders) writeHead(status, end - start + 1, contentRange);
+          if (!traced) {
+            traced = true;
+            onTrace?.call('${track.kind} 首批数据 ${bytes.length ~/ 1024} KiB');
+          }
           socket.add(bytes);
           // flush() waits once the socket's buffers are full: mpv is not
           // reading (see playerIdle).
@@ -443,6 +459,12 @@ class BtrRangeProxy {
           } catch (_) {
             track.warmEnd = 0;
             rethrow;
+          }
+          if (current.piece.start == start ||
+              (head != null && start == 0 && current.piece.start == cursor)) {
+            onTrace?.call(
+              '${track.kind} 第一个窗口完成 ${current.piece.length ~/ 1024} KiB',
+            );
           }
           if (track.warmEnd != 0 || current.piece.length > _probeBytes) {
             track.warmEnd = next;
