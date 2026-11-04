@@ -68,7 +68,7 @@ import 'package:nativeapi/nativeapi.dart' as nativeapi show Size, Rectangle;
 import 'package:path/path.dart' as path;
 import 'package:screen_brightness_platform_interface/screen_brightness_platform_interface.dart';
 import 'package:thread_ripper/auto_concurrency.dart';
-import 'package:thread_ripper/range_proxy.dart';
+import 'package:thread_ripper/btr/range_proxy.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
 import 'package:window_manager/window_manager.dart';
 
@@ -794,7 +794,7 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     }
   }
 
-  RipperRangeProxy? _ripperProxy;
+  BtrRangeProxy? _ripperProxy;
   final _ripperAutoConcurrency = RipperAutoConcurrency();
   int _ripperGeneration = 0;
   // A seek or (re)open restarts playback. Its buffering is not a download
@@ -948,7 +948,7 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
         dataSource is NetworkSource &&
         dataSource.videoCandidates?.isNotEmpty == true &&
         Pref.threadRipperEnabled) {
-      final proxy = RipperRangeProxy(
+      final proxy = BtrRangeProxy(
         concurrency: Pref.threadRipperConcurrency,
         overseas: Pref.threadRipperOverseas,
         customHosts: Pref.threadRipperCustomHosts,

@@ -98,7 +98,18 @@ MIT 版权声明见 [许可证](licenses/bilibili-thread-ripper.txt)。
   （连同封禁名单）接到这个约定上。
 
 自动线程数仍用 `auto_concurrency.dart`，新增 `subscribe`，每个下载器像原版一样订阅线程数变化。
-目前 App 仍走 `range_proxy.dart`；mpv 适配层改用 `lib/btr/` 是下一步。
+App 走 `lib/btr/range_proxy.dart`（`BtrRangeProxy`），对应原版兼容模式（`native-range-transport.js`）：
+播放器自己解码、缓冲和拖动，这里只下载它的媒体请求。原版每个 DASH 分段发一个有界请求；mpv 对每条轨道用一条连接发开放式 Range（`bytes=N-`），
+所以一个请求按有界窗口依次调用 `downloadRange`：视频每个请求的第一个窗口 1 MiB、之后 2 MiB，音频 128 KiB、之后 256 KiB
+（原版只交付完整分块，音频窗口短，音频才不会等一个和视频分带宽的大分块，见 fork issue #5）。窗口接在上一个窗口结尾时不是起播，
+否则按原版的起播处理（竞速开头再分块）；只有新的起点才调用自动线程数的 `newSession()`。第一次请求先用 `kind: "meta"` 取开头 64 KiB
+（三个节点错开竞速）得到文件长度，这段数据同时作为响应开头；HEAD 只取 1 字节。响应头等第一块数据就绪才发，之前失败返回 502，之后失败直接断开。
+接管 socket 察觉 mpv 断开、新请求取代同轨道旧请求、Range 解析与 416 沿用 `range_proxy.dart`。真实网络请求在 `lib/btr/http_fetch.dart`，
+行为与浏览器 fetch 一致（取消时挂起的请求和读取以取消原因失败；dart:io 在响应头之后取消不会让响应体报错，由读取器自己监听取消）。
+
+与浏览器的差异：dart:io 的 HttpClient 只有 HTTP/1.1，每个线程是一条 TCP 连接，取消一个传到一半的副本要断开连接、下一个请求重新握手；
+浏览器的 HTTP/2 只关闭一条流。原版的对冲策略因此在这里更贵。原版 fetch 的 `priority` 没有对应。
+旧的 `range_proxy.dart`（fork 自己写的下载调度）暂时保留作对照，App 不再使用。
 
 ### 下载器对照测试
 
@@ -199,3 +210,6 @@ mpv 日志先报 `Audio device underrun` 再进入缓冲，与 issue 描述一�
 自定义节点模式与原版对齐两处：预热按原版用 4 轮（之前通过把 `overseas` 设为真间接做到），起播探测不再加入 B 站给的原始地址
 （原版如此，本文档「自定义节点」一条也是这样写的，但之前的代码仍会加入）。`ripper_resolver.json` 新增自定义模式的对照记录，
 `ripper_assignments.json` 新增介于最快节点十二分之一与十分之一之间的节点。`dart test` 共 79 项通过，`dart analyze` 无问题。
+
+2026-11-04：App 改用 `BtrRangeProxy`（原版下载器 + mpv 适配层）。`packages/thread_ripper` 下 `dart test` 共 105 项通过
+（新增 `btr_http_fetch_test.dart` 5 项、`btr_range_proxy_test.dart` 21 项），往代理里逐个改动 14 处，每处都会让测试失败。尚未在真机上验证。
