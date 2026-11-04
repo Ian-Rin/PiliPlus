@@ -209,8 +209,11 @@ class _VideoDetailPageVState extends State<VideoDetailPageV>
         _onStreamBrokeOff;
   }
 
-  Future<void>? _onStreamBrokeOff() =>
-      videoDetailController.queryVideoUrl(fromReset: true);
+  Future<void>? _onStreamBrokeOff(Duration position) {
+    // The new player starts there (playerInit), not where mpv's playhead is.
+    videoDetailController.playedTime = position;
+    return videoDetailController.queryVideoUrl(fromReset: true);
+  }
 
   Future<void>? playCallBack() {
     if (!isShowing) {

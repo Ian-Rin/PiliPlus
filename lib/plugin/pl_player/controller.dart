@@ -1016,6 +1016,7 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     }
 
     assert(!isLive || seekTo == null);
+    _appMovesPlayhead(seekTo ?? Duration.zero);
     _ripperRestarting = true;
     await player.open(
       Media(
@@ -1030,9 +1031,58 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
   /// Reopens the video where its stream broke off: fresh addresses (a long
   /// pause can outlive their signatures) and a fresh thread-ripper proxy. Set
   /// by the page that owns the playback; [refreshPlayer] without one.
-  Future<void>? Function()? onStreamBrokeOff;
+  /// [position] is where to resume.
+  Future<void>? Function(Duration position)? onStreamBrokeOff;
 
   ({int position, DateTime at})? _lastBreakOff;
+
+  // The playhead as mpv last reported it, and when the app last moved it
+  // (a seek, a file opened at a start position).
+  Duration _reportedPosition = Duration.zero;
+  DateTime _appMovedAt = DateTime(0);
+
+  /// A jump to the end held back (see [_holdJumpToEnd]): where playback was
+  /// before it. [recovering] once the end that followed is being resumed.
+  ({Duration from, DateTime at, bool recovering})? _jumpToEnd;
+
+  void _appMovesPlayhead(Duration to) {
+    _appMovedAt = DateTime.now();
+    _reportedPosition = to;
+    _jumpToEnd = null;
+  }
+
+  /// With keep-open, mpv that reaches the end of a stream with no frame on
+  /// screen (the stream broke off while the app was in the background) first
+  /// seeks to the last frame of the file, then reports the end: the playhead
+  /// jumps to the last second, the page leaves fullscreen or moves on, and
+  /// the history records the video as watched. A jump forward into the last
+  /// two seconds that the app did not ask for is not passed on to the page:
+  /// the end that follows resumes from before the jump. Positions stay held
+  /// while that recovery runs; a jump with no end after it is let through
+  /// after five seconds.
+  bool _holdJumpToEnd(NativePlayer player, Duration position) {
+    final from = _reportedPosition;
+    _reportedPosition = position;
+    final now = DateTime.now();
+    if (_jumpToEnd case final jump?) {
+      if (jump.recovering ||
+          now.difference(jump.at) < const Duration(seconds: 5)) {
+        return true;
+      }
+      _jumpToEnd = null;
+    }
+    final duration = player.state.duration;
+    if (isLive ||
+        dataSource is FileSource ||
+        duration <= Duration.zero ||
+        now.difference(_appMovedAt) < const Duration(seconds: 10) ||
+        position - from <= const Duration(seconds: 5) ||
+        duration - position > const Duration(seconds: 2)) {
+      return false;
+    }
+    _jumpToEnd = (from: from, at: now, recovering: false);
+    return true;
+  }
 
   /// mpv ends a file also when its stream breaks off: a connection that died
   /// while the app was in the background, or the thread-ripper proxy's
@@ -1043,12 +1093,22 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
   bool _resumeIfStreamBrokeOff(NativePlayer player) {
     if (isLive || dataSource is FileSource) return false;
     final duration = player.state.duration;
-    final position = player.state.position;
+    final jump = _jumpToEnd;
+    // mpv's playhead is at the end already when it jumped there first.
+    final position = jump?.from ?? player.state.position;
     if (duration <= Duration.zero ||
         duration - position <= const Duration(seconds: 5)) {
+      _jumpToEnd = null;
       return false;
     }
-    return _recoverStream(position);
+    if (!_recoverStream(position)) {
+      _jumpToEnd = null;
+      return false;
+    }
+    if (jump != null) {
+      _jumpToEnd = (from: jump.from, at: jump.at, recovering: true);
+    }
+    return true;
   }
 
   /// Reopens at [position] (see [onStreamBrokeOff]), unless the stream broke
@@ -1067,17 +1127,25 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
       '视频连接中断，正在恢复',
       displayTime: const Duration(milliseconds: 800),
     );
-    (onStreamBrokeOff ?? refreshPlayer)();
+    if (onStreamBrokeOff case final reopen?) {
+      reopen(position);
+    } else {
+      refreshPlayer(at: position);
+    }
     return true;
   }
 
-  Future<void>? refreshPlayer() {
+  Future<void>? refreshPlayer({Duration? at}) {
     if (dataSource is FileSource) {
       return null;
     }
     if (_videoPlayerController case final ctr? when (ctr.current.isNotEmpty)) {
       var media = ctr.current.last;
-      if (!isLive) media = media.copyWith(start: ctr.state.position);
+      if (!isLive) {
+        final start = at ?? ctr.state.position;
+        media = media.copyWith(start: start);
+        _appMovesPlayhead(start);
+      }
       _ripperRestarting = true;
       return ctr.open(media, play: true);
     }
@@ -1192,6 +1260,7 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
 
       /// position
       stream.position.listen((Duration position) {
+        if (_holdJumpToEnd(player, position)) return;
         _ripperProxy?.autoConcurrency?.buffer(
           (player.state.buffer - position).inMilliseconds / 1000,
           player.state.playing && !_ripperRestarting,
@@ -1331,6 +1400,7 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     }
     danmakuController?.clear();
     _ripperRestarting = true;
+    _appMovesPlayhead(position);
     try {
       await _videoPlayerController?.seek(position);
       _updateIOSPip(position);
