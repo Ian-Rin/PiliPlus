@@ -943,9 +943,18 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
       // compatibility mode relies on it; ffmpeg's reconnect does that here,
       // from where the stream stopped. 4xx answers (an expired address) are
       // not retried.
-      if (dataSource is! FileSource && !isLive)
+      // A connection can also die without a word while the app is in the
+      // background (Wi-Fi asleep, a NAT mapping gone): the read then waits on,
+      // nothing fails, and the reconnect never comes. The picture stops and
+      // play/pause shows nothing, until the video is closed and opened again.
+      // A read that gets nothing for 15 s now fails, and reconnects. (The
+      // thread-ripper proxy can be silent for a while too, as its own retries
+      // run: up to 5.5 s for a first byte, 4 s for a stalled piece.)
+      if (dataSource is! FileSource && !isLive) ...{
         'stream-lavf-o':
             'reconnect=1,reconnect_on_network_error=1,reconnect_delay_max=4',
+        'network-timeout': '15',
+      },
     };
 
     final generation = ++_ripperGeneration;
@@ -1229,17 +1238,21 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
           _updatePlaybackState();
         }
       }),
-      if (kDebugMode)
-        stream.log.listen(((PlayerLog log) {
-          if (log.level == 'error' || log.level == 'fatal') {
-            Utils.reportError(
-              '${log.level}: ${log.prefix}: ${log.text}\n${player.state.playlist}',
-              null,
-            );
-          } else {
-            debugPrint(log.toString());
-          }
-        })),
+      // mpv's own errors (release builds log only those) go to the in-app
+      // logs (设置 → 日志) as well: a stalled or frozen player otherwise
+      // leaves no trace. The playlist, which holds signed addresses, only in
+      // debug builds.
+      stream.log.listen(((PlayerLog log) {
+        if (log.level == 'error' || log.level == 'fatal') {
+          Utils.reportError(
+            '${log.level}: ${log.prefix}: ${log.text}'
+            '${kDebugMode ? '\n${player.state.playlist}' : ''}',
+            null,
+          );
+        } else if (kDebugMode) {
+          debugPrint(log.toString());
+        }
+      })),
       stream.error.listen((String event) {
         if (dataSource is FileSource &&
             event.startsWith("Failed to open file")) {
