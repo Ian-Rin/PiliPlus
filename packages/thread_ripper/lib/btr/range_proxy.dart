@@ -243,6 +243,7 @@ class BtrRangeProxy {
           kind: track.kind,
           startup: startup,
           priority: priority,
+          onStartupScheduled: result._markScheduled,
           onOrderedChunk: (bytes, piece, fileTotal) {
             if (signal.aborted) throw abortError(signal.reason);
             if (piece.start != window.start + received ||
@@ -267,7 +268,12 @@ class BtrRangeProxy {
     result._done = run();
     // Seen by attach(); a window given up before that must not reach the
     // app's zone as an unhandled error.
-    result._done.ignore();
+    result._done.then(
+      (_) => result._markScheduled(),
+      onError: (Object _) => result._markScheduled(),
+    );
+    // A window that is not a start queues all of its pieces at once.
+    if (!startup) result._markScheduled();
     return result;
   }
 
@@ -417,7 +423,13 @@ class BtrRangeProxy {
         while (ahead != null) {
           final current = ahead;
           final next = current.piece.end + 1;
-          ahead = next <= end
+          final attached = current.attach(deliver)..ignore();
+          // A start downloads its head first and queues its pieces after it:
+          // the next window waits for those, as upstream's prefetch waits for
+          // onStartupScheduled, or it would take the connections the first
+          // picture needs while the head is on its way.
+          await current.scheduled;
+          ahead = next <= end && !job.signal.aborted
               ? _window(
                   track,
                   windowAt(next, first: false),
@@ -427,7 +439,7 @@ class BtrRangeProxy {
                 )
               : null;
           try {
-            await current.attach(deliver);
+            await attached;
           } catch (_) {
             track.warmEnd = 0;
             rethrow;
@@ -553,7 +565,17 @@ class _Window {
 
   final RipperPiece piece;
   late final Future<void> _done;
+  final _scheduled = Completer<void>();
   final _kept = <Uint8List>[];
+
+  /// Completes once every piece of this window is queued for a connection
+  /// (or the window is over).
+  Future<void> get scheduled => _scheduled.future;
+
+  void _markScheduled() {
+    if (!_scheduled.isCompleted) _scheduled.complete();
+  }
+
   Future<void> Function(Uint8List bytes)? _deliver;
 
   Future<void> _take(Uint8List bytes) {

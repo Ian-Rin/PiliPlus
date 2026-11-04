@@ -20,7 +20,7 @@ void main() {
   late int active;
   late int peak;
   late List<Timer> timers;
-  // When each request for /lag reached the CDN: (range start, ms).
+  // When each request for /lag and /headlag reached the CDN: (start, ms).
   late List<(int, int)> lagArrivals;
   final clock = Stopwatch()..start();
 
@@ -48,7 +48,7 @@ void main() {
           );
           final (start, end) = range;
           requests.add((request.uri.path, start, end));
-          if (request.uri.path == '/lag') {
+          if (request.uri.path == '/lag' || request.uri.path == '/headlag') {
             lagArrivals.add((start, clock.elapsedMilliseconds));
           }
           if (request.uri.path == '/forbidden') {
@@ -160,10 +160,13 @@ void main() {
               start < 900000) {
             timers.add(Timer(const Duration(milliseconds: 200), send));
           } else if (request.uri.path == '/lag' &&
-              start >= 65536 &&
+              start > 65536 &&
               start < 65536 + 128 * 1024) {
-            // The first audio window after the head is slow to arrive.
+            // The first audio window's piece after its head is slow.
             timers.add(Timer(const Duration(milliseconds: 800), send));
+          } else if (request.uri.path == '/headlag' && start == 65536) {
+            // The first audio window's head is slow.
+            timers.add(Timer(const Duration(milliseconds: 600), send));
           } else if (request.uri.path == '/slow') {
             timers.add(Timer(const Duration(seconds: 3), send));
           } else {
@@ -559,6 +562,23 @@ void main() {
         .map((r) => r.$2)
         .reduce(min);
     expect(ahead - firstMedia, lessThan(600));
+  });
+
+  // Upstream's prefetch waits for onStartupScheduled: while a start's head
+  // is on its way, the next window must not take the connections its
+  // pieces are about to need.
+  test('the next window waits for a start to queue its pieces', () async {
+    final audio = proxy.registerCandidates([
+      endpoint('/headlag'),
+    ], isAudio: true);
+    final result = await fetch(audio);
+    expect(result.$2, source);
+    int firstAt(bool Function(int start) where) =>
+        lagArrivals.where((r) => where(r.$1)).map((r) => r.$2).reduce(min);
+    final piece = firstAt((start) => start == 65536 + 64 * 1024);
+    final ahead = firstAt((start) => start >= 65536 + 128 * 1024);
+    expect(firstAt((start) => start == 65536), lessThan(piece));
+    expect(ahead, greaterThanOrEqualTo(piece));
   });
 
   test('a copy resumes the live first copy on a different node', () async {
