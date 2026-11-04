@@ -1350,7 +1350,12 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
         if (_holdJumpToEnd(player, position)) return;
         _traceStartup(position);
         _ripperProxy?.autoConcurrency?.buffer(
-          (player.state.buffer - position).inMilliseconds / 1000,
+          // Seconds of playback left, not of media: at 2x the buffer lasts
+          // half as long, and the thresholds (more threads under 6 s, fewer
+          // over 15 s) are about how long playback can go on.
+          (player.state.buffer - position).inMilliseconds /
+              1000 /
+              max(player.state.rate, 0.25),
           player.state.playing && !_ripperRestarting,
           // Not player.getProperty('demuxer-cache-idle'): a synchronous mpv
           // read waits for mpv's core, and the whole app freezes while it is
