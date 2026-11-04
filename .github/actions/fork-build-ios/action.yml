@@ -1,0 +1,39 @@
+# The steps of upstream's .github/workflows/ios.yml, for this fork's own
+# workflows (fork-ios.yml). Kept apart so that upstream's file stays as it is
+# and the daily sync does not conflict on it; when upstream changes its build
+# steps, change them here too.
+name: Build unsigned iOS IPA
+description: Flutter iOS release build without code signing, zipped as an ipa and uploaded.
+
+runs:
+  using: composite
+  steps:
+    - name: Setup flutter
+      uses: subosito/flutter-action@v2
+      with:
+        channel: stable
+        flutter-version-file: pubspec.yaml
+
+    - name: Set and Extract version
+      shell: pwsh
+      run: lib/scripts/build.ps1
+
+    - name: Apply Patch
+      shell: pwsh
+      run: lib/scripts/patch.ps1 iOS
+
+    - name: Build iOS
+      shell: bash
+      run: |
+        flutter build ios --release --no-codesign --dart-define-from-file=pili_release.json --no-pub
+        ln -sf ./build/ios/iphoneos Payload
+        # make AltSign happy...
+        find Payload/Runner.app/Frameworks -type d -name "*.framework" -exec codesign --force --sign - --preserve-metadata=identifier,entitlements {} \;
+        zip -r9 PiliPlus_ios_${{ env.version }}.ipa Payload/Runner.app
+
+    - name: Upload ios release
+      uses: actions/upload-artifact@v7
+      with:
+        archive: false
+        name: iOS-release
+        path: PiliPlus_ios_*.ipa

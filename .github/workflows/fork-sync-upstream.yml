@@ -1,0 +1,111 @@
+# Merges upstream PiliPlus (bggRGjQaUbCoE/PiliPlus) into this fork's main
+# once a day, checks the result, pushes it and starts the iOS build.
+# Nothing is pushed when the merge conflicts or the check fails: the run then
+# fails, says why on its page, and GitHub mails a failed scheduled run.
+#
+# GITHUB_TOKEN may not push a merge that changes upstream's workflow files;
+# such a day fails at the push. A token with the workflow scope in the
+# SYNC_TOKEN secret lets it through.
+name: Fork sync upstream
+
+on:
+  schedule:
+    # 18:17 UTC: 05:17 in Sydney (AEDT), the build is ready by the morning.
+    - cron: "17 18 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: fork-sync-upstream
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  sync:
+    name: Merge upstream main
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout fork main
+        uses: actions/checkout@v7
+        with:
+          ref: main
+          fetch-depth: 0
+          token: ${{ secrets.SYNC_TOKEN || github.token }}
+
+      - name: Merge upstream main
+        id: merge
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          # The fork keeps its own README (.gitattributes: merge=ours).
+          git config merge.ours.driver true
+          git remote add upstream https://github.com/bggRGjQaUbCoE/PiliPlus.git
+          git fetch upstream main
+          if git merge-base --is-ancestor upstream/main HEAD; then
+            echo "Already has everything from upstream." | tee -a "$GITHUB_STEP_SUMMARY"
+            echo "result=none" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          {
+            echo "Upstream commits to merge:"
+            echo '```'
+            git log --oneline HEAD..upstream/main
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          if git merge --no-edit upstream/main; then
+            echo "result=merged" >> "$GITHUB_OUTPUT"
+          else
+            {
+              echo "**合并冲突，没有推送。**需要手动合并的文件："
+              echo '```'
+              git diff --name-only --diff-filter=U
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            git merge --abort
+            echo "result=conflict" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+
+      - name: Setup Flutter
+        if: steps.merge.outputs.result == 'merged'
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version-file: pubspec.yaml
+
+      # The app uses Flutter internals that upstream's patches expose; without
+      # them the check reports errors that are not there.
+      - name: Apply project Flutter patches
+        if: steps.merge.outputs.result == 'merged'
+        shell: pwsh
+        run: lib/scripts/patch.ps1 android
+
+      - name: Check the merge
+        if: steps.merge.outputs.result == 'merged'
+        shell: bash
+        run: |
+          # Errors only: upstream's code carries infos and warnings.
+          if ! flutter analyze --no-fatal-infos --no-fatal-warnings; then
+            echo "**合并后代码有错误（flutter analyze），没有推送。**" >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          cd packages/thread_ripper
+          dart pub get
+          if ! dart test; then
+            echo "**合并后线程撕裂者的测试失败，没有推送。**" >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+
+      - name: Push and start the iOS build
+        if: steps.merge.outputs.result == 'merged'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git push origin HEAD:main
+          # A push with GITHUB_TOKEN starts no workflow; a dispatch does.
+          gh workflow run fork-ios.yml --ref main
+          echo "已推送，iOS 编译已开始。" >> "$GITHUB_STEP_SUMMARY"

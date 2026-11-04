@@ -1,0 +1,50 @@
+# This fork's iOS build on macos-26: every push to main, and by hand.
+# - New code on main cancels the build still running for older code.
+# - A failed build is tried once more (GitHub's Macs can be out of capacity:
+#   the job then fails without ever being picked up). A build cancelled by
+#   newer code is not retried.
+# The ipa is the run's artifact (iOS-release), at the bottom of the run page.
+name: Fork iOS build
+run-name: iOS · ${{ github.event.head_commit.message || github.sha }}
+
+on:
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - "**.md"
+      - "docs/**"
+      - "tool/**"
+  workflow_dispatch:
+
+concurrency:
+  group: fork-ios-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build
+    runs-on: macos-26
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Build
+        uses: ./.github/actions/fork-build-ios
+
+  retry:
+    name: Retry
+    needs: build
+    # failure() is false for a build cancelled by newer code.
+    if: failure()
+    runs-on: macos-26
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Build
+        uses: ./.github/actions/fork-build-ios
