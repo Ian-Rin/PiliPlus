@@ -68,6 +68,8 @@ export HOME="$ROOT/home"
 mkdir -p "$HOME"
 export LANG=en_US.UTF-8
 export LC_ALL=en_US.UTF-8
+# Never stop to page output (git log would wait for q).
+export GIT_PAGER=cat PAGER=cat
 
 # --- 项目代码：每次重新 clone（构建脚本会改仓库里的文件） ---------------------
 say "获取 $BRANCH 分支"
