@@ -758,7 +758,19 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
   }) async {
     try {
       _processing = true;
-      _startup = _StartupTrace();
+      final trace = _startup = _StartupTrace();
+      // A start that never comes (loading forever) is logged too, with how
+      // far it got.
+      if (autoplay) {
+        Timer(const Duration(seconds: 15), () {
+          if (trace.done || !identical(_startup, trace) || _playerCount == 0) {
+            return;
+          }
+          trace.mark('15 秒内没有开始播放');
+          trace.done = true;
+          Utils.reportError(trace.report);
+        });
+      }
       this.isLive = isLive;
       _videoType = videoType ?? VideoType.ugc;
       this.width = width;
