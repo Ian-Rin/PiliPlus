@@ -1009,6 +1009,43 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     );
   }
 
+  /// Reopens the video where its stream broke off: fresh addresses (a long
+  /// pause can outlive their signatures) and a fresh thread-ripper proxy. Set
+  /// by the page that owns the playback; [refreshPlayer] without one.
+  Future<void>? Function()? onStreamBrokeOff;
+
+  ({int position, DateTime at})? _lastBreakOff;
+
+  /// mpv ends a file also when its stream breaks off: a connection that died
+  /// while the app was in the background, or the thread-ripper proxy's
+  /// socket that iOS reclaimed meanwhile. It reads that as the end, and the
+  /// page would move on to the next video. An end well before the duration
+  /// resumes playback instead. A second one at the same place within a
+  /// minute is taken as the real end (a damaged file), so it cannot loop.
+  bool _resumeIfStreamBrokeOff(NativePlayer player) {
+    if (isLive || dataSource is FileSource) return false;
+    final duration = player.state.duration;
+    final position = player.state.position;
+    if (duration <= Duration.zero ||
+        duration - position <= const Duration(seconds: 5)) {
+      return false;
+    }
+    final now = DateTime.now();
+    if (_lastBreakOff case final last?
+        when now.difference(last.at) < const Duration(minutes: 1) &&
+            (position.inSeconds - last.position).abs() <= 5) {
+      _lastBreakOff = null;
+      return false;
+    }
+    _lastBreakOff = (position: position.inSeconds, at: now);
+    SmartDialog.showToast(
+      '视频连接中断，正在恢复',
+      displayTime: const Duration(milliseconds: 800),
+    );
+    (onStreamBrokeOff ?? refreshPlayer)();
+    return true;
+  }
+
   Future<void>? refreshPlayer() {
     if (dataSource is FileSource) {
       return null;
@@ -1115,6 +1152,7 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
 
       ///completed
       stream.completed.listen((bool completed) {
+        if (completed && _resumeIfStreamBrokeOff(player)) return;
         if (completed) {
           playerStatus = .completed;
           _startWakeLockTimer();

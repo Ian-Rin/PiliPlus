@@ -204,7 +204,13 @@ class _VideoDetailPageVState extends State<VideoDetailPageV>
       playCallBack,
       playOwner: (tag: heroTag, type: introController.runtimeType),
     );
+    // The player is shared by the video pages: the one showing owns recovery.
+    videoDetailController.plPlayerController.onStreamBrokeOff =
+        _onStreamBrokeOff;
   }
+
+  Future<void>? _onStreamBrokeOff() =>
+      videoDetailController.queryVideoUrl(fromReset: true);
 
   Future<void>? playCallBack() {
     if (!isShowing) {
@@ -336,6 +342,13 @@ class _VideoDetailPageVState extends State<VideoDetailPageV>
     plPlayerController
       ?..removeStatusLister(playerListener)
       ..removePositionListener(positionListener);
+    // Only our own: the page below has set its own again (didPopNext runs
+    // before this page's dispose).
+    final player = videoDetailController.plPlayerController;
+    // Tear-offs of one method on one object are ==, not identical.
+    if (player.onStreamBrokeOff == _onStreamBrokeOff) {
+      player.onStreamBrokeOff = null;
+    }
 
     Get.delete<HorizontalMemberPageController>(
       tag: videoDetailController.heroTag,
