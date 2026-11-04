@@ -461,6 +461,37 @@ void main() {
     },
   );
 
+  // mpv stops reading once its cache is full; the proxy then waits on the
+  // socket, and says so without asking mpv (a synchronous property read can
+  // freeze the app).
+  test('playerIdle tells when mpv stops taking bytes', () async {
+    source = Uint8List.fromList(
+      List.generate(24 * 1024 * 1024, (i) => (i * 37) % 251),
+    );
+    expect(proxy.playerIdle, isFalse);
+    final url = Uri.parse(register(['/good']));
+    final socket = await Socket.connect(url.host, url.port);
+    final subscription = socket.listen((_) {})..pause();
+    socket.write('GET ${url.path} HTTP/1.1\r\nHost: ${url.host}\r\n\r\n');
+    await socket.flush();
+    var idle = false;
+    for (var i = 0; i < 100 && !idle; i++) {
+      await Future<void>.delayed(const Duration(milliseconds: 100));
+      idle = proxy.playerIdle;
+    }
+    expect(idle, isTrue);
+    // Reading again: the request goes on, and once it is over nothing waits.
+    final done = Completer<void>();
+    subscription
+      ..onDone(done.complete)
+      ..resume();
+    await done.future.timeout(const Duration(seconds: 20));
+    await Future<void>.delayed(const Duration(milliseconds: 100));
+    expect(proxy.playerIdle, isFalse);
+    await subscription.cancel();
+    socket.destroy();
+  });
+
   test('a copy resumes the live first copy on a different node', () async {
     final watch = Stopwatch()..start();
     final result = await fetch(register(['/resume-primary', '/resume-backup']));

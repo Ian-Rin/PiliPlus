@@ -63,6 +63,25 @@ class BtrRangeProxy {
   final _bans = RipperBanList();
   final _tracks = <String, _Track>{};
   final _jobs = <RipperAbortController>{};
+
+  // Every GET being served, and since when it has been waiting for mpv to
+  // take the bytes it was handed (null while it is not).
+  final _handedOver = <RipperAbortController, DateTime?>{};
+
+  /// Whether mpv has stopped reading: every request being served has been
+  /// waiting at least [_idleAfter] for mpv to take its bytes, which mpv does
+  /// once its cache is full (the counterpart of mpv's demuxer-cache-idle).
+  /// Free to read on the UI thread: a synchronous mpv property read waits for
+  /// mpv's core and freezes the whole app while that is busy.
+  bool get playerIdle {
+    if (_handedOver.isEmpty) return false;
+    final now = DateTime.now();
+    return _handedOver.values.every(
+      (since) => since != null && now.difference(since) >= _idleAfter,
+    );
+  }
+
+  static const _idleAfter = Duration(milliseconds: 250);
   bool _closed = false;
   HttpServer? _server;
   final String _token = List.generate(
@@ -325,10 +344,18 @@ class BtrRangeProxy {
         track.opened = true;
         // Headers go out with the first bytes, so a request that fails before
         // any arrive is a 502, not a stream cut short.
+        _handedOver[job] = null;
         Future<void> deliver(Uint8List bytes) async {
           if (!sentHeaders) writeHead(status, end - start + 1, contentRange);
           socket.add(bytes);
-          await _race(socket.flush(), job.signal);
+          // flush() waits once the socket's buffers are full: mpv is not
+          // reading (see playerIdle).
+          _handedOver[job] = DateTime.now();
+          try {
+            await _race(socket.flush(), job.signal);
+          } finally {
+            if (_handedOver.containsKey(job)) _handedOver[job] = null;
+          }
         }
 
         var cursor = start;
@@ -368,6 +395,7 @@ class BtrRangeProxy {
     } finally {
       job.abort(RipperError.abort('请求已结束'));
       _jobs.remove(job);
+      _handedOver.remove(job);
       if (identical(track.request, job)) track.request = null;
     }
   }

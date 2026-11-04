@@ -1062,74 +1062,6 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     return true;
   }
 
-  // When only the video track's connection breaks off (and reconnecting did
-  // not bring it back), mpv plays the audio on and never buffers: the picture
-  // stops, and pausing then leaves it black. Neither the stall signal nor the
-  // end of the file shows it. While playing, the frame is sampled every
-  // 1.5 s: the position moving on while the frame stays the same three times
-  // running reopens the video. (The fork detected this before thread-ripper,
-  // in 94db54c1e, and dropped it with the old CDN switching.)
-  Timer? _videoFreezeTimer;
-  int _freezePositionMs = -1;
-  String? _freezePts;
-  int _freezeSamples = 0;
-
-  void _syncVideoFreezeSampler(bool playing) {
-    if (playing && !isLive && dataSource is! FileSource) {
-      _videoFreezeTimer ??= Timer.periodic(
-        const Duration(milliseconds: 1500),
-        (_) => _sampleVideoFreeze(),
-      );
-    } else {
-      _videoFreezeTimer?.cancel();
-      _videoFreezeTimer = null;
-      _resetFreezeSamples();
-    }
-  }
-
-  void _resetFreezeSamples() {
-    _freezePositionMs = -1;
-    _freezePts = null;
-    _freezeSamples = 0;
-  }
-
-  void _sampleVideoFreeze() {
-    final player = _videoPlayerController;
-    if (player == null ||
-        !visible ||
-        isBuffering.value ||
-        isSeeking.value ||
-        onlyPlayAudio.value ||
-        _ripperRestarting) {
-      _resetFreezeSamples();
-      return;
-    }
-    final String pts;
-    try {
-      // A file without a picture (or with it switched off) has nothing to stop.
-      if (const ['', 'no'].contains(player.getProperty('vid'))) {
-        _resetFreezeSamples();
-        return;
-      }
-      // Empty once the track has ended: that counts as a frame that stays.
-      pts = player.getProperty('video-pts');
-    } catch (_) {
-      return;
-    }
-    final positionMs = player.state.position.inMilliseconds;
-    final advanced = _freezePositionMs >= 0 && positionMs > _freezePositionMs;
-    final frozen = pts == _freezePts;
-    _freezePositionMs = positionMs;
-    _freezePts = pts;
-    if (!(frozen && advanced)) {
-      _freezeSamples = 0;
-      return;
-    }
-    if (++_freezeSamples < 3) return;
-    _resetFreezeSamples();
-    _recoverStream(player.state.position);
-  }
-
   Future<void>? refreshPlayer() {
     if (dataSource is FileSource) {
       return null;
@@ -1224,7 +1156,6 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
           _updateIOSPip();
         }
 
-        _syncVideoFreezeSampler(playing);
         for (final element in _statusListeners) {
           element(playing ? .playing : .paused);
         }
@@ -1255,7 +1186,10 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
         _ripperProxy?.autoConcurrency?.buffer(
           (player.state.buffer - position).inMilliseconds / 1000,
           player.state.playing && !_ripperRestarting,
-          cacheFull: () => player.getProperty('demuxer-cache-idle') == 'yes',
+          // Not player.getProperty('demuxer-cache-idle'): a synchronous mpv
+          // read waits for mpv's core, and the whole app freezes while it is
+          // busy (returning from the background). The proxy knows the same.
+          cacheFull: () => _ripperProxy?.playerIdle ?? false,
         );
         final posInSeconds = position.inSeconds;
 
@@ -1365,7 +1299,6 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
 
   /// 移除事件监听
   void _removeListeners() {
-    _syncVideoFreezeSampler(false);
     _subscriptions?.forEach((e) => e.cancel());
     _subscriptions?.clear();
     _subscriptions = null;
