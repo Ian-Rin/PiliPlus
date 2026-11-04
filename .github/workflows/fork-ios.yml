@@ -5,7 +5,6 @@
 #   newer code is not retried.
 # The ipa is the run's artifact (iOS-release), at the bottom of the run page.
 name: Fork iOS build
-run-name: iOS · ${{ github.event.head_commit.message || github.sha }}
 
 on:
   push:
