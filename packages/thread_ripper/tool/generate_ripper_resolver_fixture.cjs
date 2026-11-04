@@ -47,6 +47,42 @@ for (const mode of ['overseas','mainland']) {
 }
 fs.writeFileSync(out('ripper_resolver.json'), JSON.stringify(fixtures,null,2)+'\n');
 
+// Candidate lists for many address mixes: ordinary, akamaized.net, relays (mcdn hosts,
+// /v1/resource/ paths, os=mcdn), peer ports, duplicates and addresses that are not media.
+const signed = '/upgcxcode/12/34/567/567-1-30080.m4s?e=ig8euxZM&os=upos&sign=a%2Bb';
+const relayMcdn = 'https://xy1x2x3x4xy.mcdn.bilivideo.cn:4483/upgcxcode/12/34/567/567-1-30080.m4s?e=r&os=mcdn&sign=r1';
+const relayPath = 'https://ab12.mountaintoys.cn/v1/resource/abcdef/567-1-30080.m4s?sign=r2';
+const relayQuery = 'https://upos-sz-mirrorcos.bilivideo.com/upgcxcode/12/34/567/567-1-30080.m4s?os=MCDN&sign=r3';
+// Each relay rule alone: an mcdn host without os=mcdn and without a /v1/resource/ path.
+const relayHostOnly = 'https://xy5x6x7x8xy.mcdn.bilivideo.cn:4483/upgcxcode/12/34/567/567-1-30080.m4s?e=r&sign=r4';
+const addressMixes = {
+  ordinary: [`https://upos-sz-mirrorali.bilivideo.com${signed}`, `https://upos-sz-mirroraliov.bilivideo.com${signed}`],
+  akamaiOnly: [`https://upos-hz-mirrorakam.akamaized.net${signed}`, `https://upos-sz-mirrorakam2.akamaized.net${signed}`],
+  relayThenOrdinary: [relayMcdn, `https://upos-sz-mirrorcos.bilivideo.com${signed}`],
+  relaysOnly: [relayMcdn, relayPath],
+  relayByQueryOnly: [relayQuery],
+  relayByHostThenOrdinary: [relayHostOnly, `https://upos-sz-mirrorcos.bilivideo.com${signed}`],
+  akamaiAndRelay: [`https://upos-hz-mirrorakam.akamaized.net${signed}`, relayMcdn],
+  peerPortAndNewMainland: [`https://xy1.szbdyd.com:4483${signed}`, `https://upos-sz-mirrorcoso1.bilivideo.com${signed}`],
+  duplicatesAndJunk: [`https://upos-sz-mirrorali.bilivideo.com${signed}`, `https://upos-sz-mirrorali.bilivideo.com${signed}`,
+    'https://example.com/v.m4s', `http://upos-sz-mirrorhw.bilivideo.com${signed}`, 'https://upos-sz-mirrorhw.bilivideo.com/x.json'],
+  upperCaseHost: [`https://UPOS-SZ-MIRRORALI.bilivideo.com${signed}`],
+};
+const regions = [
+  { mode: 'overseas', customHosts: [] },
+  { mode: 'mainland', customHosts: [] },
+  { mode: 'custom', customHosts: ['upos-sz-mirrorcos.bilivideo.com', 'cn-hk-eq-01-03.bilivideo.com'] },
+];
+const candidates = [];
+for (const [name, originals] of Object.entries(addressMixes)) {
+  for (const { mode, customHosts } of regions) {
+    const [baseUrl, ...backupUrl] = originals;
+    const expected = factory.representationUrls({ baseUrl, backupUrl }, mode, customHosts);
+    candidates.push({ name, mode, customHosts, originals, expected });
+  }
+}
+fs.writeFileSync(out('ripper_candidates.json'), JSON.stringify(candidates,null,2)+'\n');
+
 // Expose the unchanged upstream assignment function only in this test VM.
 const source = fs.readFileSync(path.join(root, 'src/idm-downloader.js'), 'utf8');
 const marker = 'return Object.freeze({ downloadRange, applySettings, getConcurrency: () => semaphore.limit });';

@@ -151,6 +151,29 @@ void main() {
     },
   );
 
+  test(
+    'candidates match upstream for ordinary, akamai, relay and junk addresses',
+    () {
+      final cases = jsonDecode(
+        File('test/fixtures/ripper_candidates.json').readAsStringSync(),
+      ) as List;
+      expect(cases, isNotEmpty);
+      for (final c in cases) {
+        final urls = RipperCdnResolver.candidates(
+          List<String>.from(c['originals']),
+          // The custom mode ignores the region once servers are picked.
+          overseas: c['mode'] == 'overseas',
+          customHosts: List<String>.from(c['customHosts']),
+        );
+        expect(
+          urls.map((u) => u.toString()).toList(),
+          c['expected'],
+          reason: '${c['name']} ${c['mode']}',
+        );
+      }
+    },
+  );
+
   test('weighted assignments match upstream including sparse exploration', () {
     final fixtures = jsonDecode(
       File('test/fixtures/ripper_assignments.json').readAsStringSync(),

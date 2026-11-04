@@ -1,7 +1,7 @@
 # 线程撕裂者下载层
 
-参考 Bilibili-thread-ripper **2026.10.8.1** 正式版（上游提交
-`c283962cc`）移植共享下载核心：
+参考 Bilibili-thread-ripper **2026.11.3.1** 正式版（上游提交
+`e409a42cb`）移植共享下载核心：
 https://github.com/MrTangLuyao/Bilibili-thread-ripper
 
 0.9.4.2 之后上游下载核心只改了自动线程数（2026.9.29.1 起播加速，2026.10.7.1 上限提到 64），已同步；`range-core.js`、`cdn-resolver.js`
@@ -9,6 +9,9 @@ https://github.com/MrTangLuyao/Bilibili-thread-ripper
 其余更新（0.9.4.3 的 MSE 编码失败标记与 Hi-Res/杜比音轨接管、油猴设置存储、暴力猴适配、诊断信息复制、悬浮球，
 2026.10.4.1 的互动视频全接管修复，2026.10.7.2 的设置面板深浅色主题与换脚本管理器不再带设置，
 2026.10.8.1 的剧集页兼容模式接管、直播加速改为默认关闭）都是网页端的，不适用于原生播放器；这里本来就不加速直播。
+2026.10.8.1 → 2026.11.3.1：`cdn-resolver.js` 的中继地址修复（上游 #47）和大陆节点 `mirrorcoso1`（上游 #44）已同步；
+`idm-downloader.js` 只抽出了 `roundPause`、`orderedDelivery` 两个函数，行为不变，自动线程数和任务分配的对照数据逐字节相同；
+`range-core.js` 新增的设置（阻止国际版、首次引导、全接管预缓冲时长、二级缓冲）都属于网页端。
 
 参考 `src/range-core.js`、`src/cdn-resolver.js`、`src/idm-downloader.js`。
 MIT 版权声明见 [许可证](licenses/bilibili-thread-ripper.txt)。
@@ -47,6 +50,8 @@ MIT 版权声明见 [许可证](licenses/bilibili-thread-ripper.txt)。
   错区间、截断、超长响应。响应头不对的响应不会有任何字节交给播放器；分块边收边转后，
   超长响应要到收完才能发现，此前转出的只是所请求区间内的字节，多出的部分不会转出。
 - 使用上游的大陆/海外节点名单、签名路径保留、Akamai-only 地址合成、失败节点退避及每视频封禁（区分节点、地址与节点/地址组合）。
+  中继地址（`mcdn.` 域名、`/v1/resource/` 路径或 `os=mcdn`）带着中继自己的路径和签名，普通节点会拒绝（403），
+  所以只用普通地址合成其他节点；B 站只给中继地址时，不论地区都用这些中继兜底。
   元数据候选包括原始 API 地址；媒体候选按原版地区规则过滤。
 - 原生适配边界：mpv 决定读取、拖动及缓冲，不能直接复用浏览器的 SIDX/MSE
   SourceBuffer 调度。代理将开放式 Range 拆成约 2 MiB 的视频窗口，按预算分块，
@@ -82,7 +87,8 @@ MIT 版权声明见 [许可证](licenses/bilibili-thread-ripper.txt)。
 
 `packages/thread_ripper/test/fixtures/ripper_resolver.json` 由原版 JavaScript 直接产生，覆盖两种地区的
 候选生成、预热、成功/失败后的排序、采样过期和轮换；Dart 测试逐步核对这些结果。
-`ripper_assignments.json` 对照原版任务分配，`ripper_auto.json` 分场景对照自动并发试升/回退/限流/缓冲压力和起播加速。
+`ripper_candidates.json` 对照原版 `representationUrls`：普通、Akamai、三种中继、对等端口、重复和非媒体地址，
+各在海外、大陆、自定义三种模式下的候选列表。`ripper_assignments.json` 对照原版任务分配，`ripper_auto.json` 分场景对照自动并发试升/回退/限流/缓冲压力和起播加速。
 更新参考数据：`node packages/thread_ripper/tool/generate_ripper_resolver_fixture.cjs <上游源码目录>`（可在任意目录运行，结果写入包内的 `test/fixtures`）。
 另有八个并发读取同时遭遇媒体节点停滞的回归用例，验证救援仍能启动且本地活动请求不超过 8。
 
@@ -147,3 +153,7 @@ mpv 日志先报 `Audio device underrun` 再进入缓冲，与 issue 描述一�
 和缓存预热不同，原版核心测量也不包含原生代理的一次资源长度探测。
 公开接口返回的轨道为 id=32、codec=12、176968 bit/s，未使用用户登录信息。
 不能将这些结果当作平板上用户所选高画质、音视频同步或完整 284 秒播放的验证。
+
+2026-11-04：同步上游 2026.11.3.1。对照数据由上游 `e409a42cb` 重新生成，只有 `ripper_resolver.json` 变化（大陆模式多了 `mirrorcoso1`）；
+新增 `ripper_candidates.json`（10 种地址组合 × 3 种模式，共 30 项）覆盖中继修复。在 `packages/thread_ripper` 下 `dart test` 共 40 项通过，
+`dart analyze` 无问题。逐条删去移植的改动（中继兜底、只用普通地址合成、三条中继判断规则各一、`mirrorcoso1`）共 7 处，每一处都会让对照测试失败。

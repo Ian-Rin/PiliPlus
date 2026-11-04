@@ -1,4 +1,4 @@
-// Adapted from Bilibili-thread-ripper 0.9.4.2, MIT.
+// Adapted from Bilibili-thread-ripper src/cdn-resolver.js (2026.11.3.1), MIT.
 // See docs/thread-ripper.md and docs/licenses/bilibili-thread-ripper.txt.
 import 'dart:math';
 
@@ -12,6 +12,7 @@ class RipperCdnResolver {
     'upos-sz-mirror14b.bilivideo.com',
     'upos-sz-estgoss.bilivideo.com',
     'upos-sz-mirrorcos.bilivideo.com',
+    'upos-sz-mirrorcoso1.bilivideo.com',
   ];
   static const overseasHosts = [
     'upos-sz-mirrorcosov.bilivideo.com',
@@ -40,13 +41,50 @@ class RipperCdnResolver {
         : null;
   }
 
+  static final _relayHost = RegExp(r'(^|\.)mcdn\.', caseSensitive: false);
+  static final _relayPath = RegExp(r'^/v1/resource/', caseSensitive: false);
+
+  /// Upstream `isRelayUrl` (#47): a P2P or edge-cache relay (an mcdn node, or
+  /// the mountaintoys.cn caches beside them) wraps the file in its own path and
+  /// signature. Its address works only on relays: every ordinary node refuses
+  /// it.
+  static bool isRelay(Uri uri) =>
+      _relayHost.hasMatch(uri.host) ||
+      _relayPath.hasMatch(uri.path) ||
+      _firstQueryValue(uri, 'os')?.toLowerCase() == 'mcdn';
+
+  /// Like URLSearchParams.get: the first value, and a malformed escape does
+  /// not make the whole query unreadable.
+  static String? _firstQueryValue(Uri uri, String name) {
+    String decode(String s) {
+      final text = s.replaceAll('+', ' ');
+      try {
+        return Uri.decodeComponent(text);
+      } on ArgumentError {
+        return text;
+      } on FormatException {
+        return text;
+      }
+    }
+
+    for (final part in uri.query.split('&')) {
+      final eq = part.indexOf('=');
+      final key = decode(eq < 0 ? part : part.substring(0, eq));
+      if (key == name) return eq < 0 ? '' : decode(part.substring(eq + 1));
+    }
+    return null;
+  }
+
   static List<Uri> candidates(
     Iterable<String> urls, {
     required bool overseas,
     List<String> customHosts = const [],
   }) {
     final originals = urls.map(Uri.parse).where(supports).toSet().toList();
-    final donors = originals.where((u) => !u.host.endsWith('.akamaized.net'));
+    // A relay address moved to an ordinary node is refused there, so only
+    // ordinary addresses are moved to the other nodes.
+    final ordinary = originals.where((u) => !isRelay(u)).toList();
+    final donors = ordinary.where((u) => !u.host.endsWith('.akamaized.net'));
     final custom = customHosts
         .map(normalizeHost)
         .whereType<String>()
@@ -67,8 +105,12 @@ class RipperCdnResolver {
             : mainlandHosts.contains(u.host),
       ),
       for (final host in hosts)
-        for (final donor in donors.isEmpty ? originals : donors.take(1))
+        for (final donor in donors.isEmpty ? ordinary : donors.take(1))
           donor.replace(host: host, port: 443),
+      // Bilibili sometimes hands a track out only through relays. No other
+      // node can serve it then, so the relays are used whatever the mode,
+      // rather than giving the video up.
+      if (ordinary.isEmpty) ...originals,
     }.toList();
   }
 
