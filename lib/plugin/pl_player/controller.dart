@@ -937,6 +937,15 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
       else
         ...buffer,
       'video-rotate': ?rotate?.toString(),
+      // mpv takes a connection that breaks off for the end of the stream: of
+      // the file, or of one track (the picture stops while the audio plays
+      // on). A browser's player asks for the segment again, and upstream's
+      // compatibility mode relies on it; ffmpeg's reconnect does that here,
+      // from where the stream stopped. 4xx answers (an expired address) are
+      // not retried.
+      if (dataSource is! FileSource && !isLive)
+        'stream-lavf-o':
+            'reconnect=1,reconnect_on_network_error=1,reconnect_delay_max=4',
     };
 
     final generation = ++_ripperGeneration;
@@ -1030,6 +1039,13 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
         duration - position <= const Duration(seconds: 5)) {
       return false;
     }
+    return _recoverStream(position);
+  }
+
+  /// Reopens at [position] (see [onStreamBrokeOff]), unless the stream broke
+  /// off at the same place within the last minute: then it is left alone, so
+  /// that a damaged file cannot loop. Returns whether it reopened.
+  bool _recoverStream(Duration position) {
     final now = DateTime.now();
     if (_lastBreakOff case final last?
         when now.difference(last.at) < const Duration(minutes: 1) &&
@@ -1044,6 +1060,74 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     );
     (onStreamBrokeOff ?? refreshPlayer)();
     return true;
+  }
+
+  // When only the video track's connection breaks off (and reconnecting did
+  // not bring it back), mpv plays the audio on and never buffers: the picture
+  // stops, and pausing then leaves it black. Neither the stall signal nor the
+  // end of the file shows it. While playing, the frame is sampled every
+  // 1.5 s: the position moving on while the frame stays the same three times
+  // running reopens the video. (The fork detected this before thread-ripper,
+  // in 94db54c1e, and dropped it with the old CDN switching.)
+  Timer? _videoFreezeTimer;
+  int _freezePositionMs = -1;
+  String? _freezePts;
+  int _freezeSamples = 0;
+
+  void _syncVideoFreezeSampler(bool playing) {
+    if (playing && !isLive && dataSource is! FileSource) {
+      _videoFreezeTimer ??= Timer.periodic(
+        const Duration(milliseconds: 1500),
+        (_) => _sampleVideoFreeze(),
+      );
+    } else {
+      _videoFreezeTimer?.cancel();
+      _videoFreezeTimer = null;
+      _resetFreezeSamples();
+    }
+  }
+
+  void _resetFreezeSamples() {
+    _freezePositionMs = -1;
+    _freezePts = null;
+    _freezeSamples = 0;
+  }
+
+  void _sampleVideoFreeze() {
+    final player = _videoPlayerController;
+    if (player == null ||
+        !visible ||
+        isBuffering.value ||
+        isSeeking.value ||
+        onlyPlayAudio.value ||
+        _ripperRestarting) {
+      _resetFreezeSamples();
+      return;
+    }
+    final String pts;
+    try {
+      // A file without a picture (or with it switched off) has nothing to stop.
+      if (const ['', 'no'].contains(player.getProperty('vid'))) {
+        _resetFreezeSamples();
+        return;
+      }
+      // Empty once the track has ended: that counts as a frame that stays.
+      pts = player.getProperty('video-pts');
+    } catch (_) {
+      return;
+    }
+    final positionMs = player.state.position.inMilliseconds;
+    final advanced = _freezePositionMs >= 0 && positionMs > _freezePositionMs;
+    final frozen = pts == _freezePts;
+    _freezePositionMs = positionMs;
+    _freezePts = pts;
+    if (!(frozen && advanced)) {
+      _freezeSamples = 0;
+      return;
+    }
+    if (++_freezeSamples < 3) return;
+    _resetFreezeSamples();
+    _recoverStream(player.state.position);
   }
 
   Future<void>? refreshPlayer() {
@@ -1140,6 +1224,7 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
           _updateIOSPip();
         }
 
+        _syncVideoFreezeSampler(playing);
         for (final element in _statusListeners) {
           element(playing ? .playing : .paused);
         }
@@ -1280,6 +1365,7 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
 
   /// 移除事件监听
   void _removeListeners() {
+    _syncVideoFreezeSampler(false);
     _subscriptions?.forEach((e) => e.cancel());
     _subscriptions?.clear();
     _subscriptions = null;
