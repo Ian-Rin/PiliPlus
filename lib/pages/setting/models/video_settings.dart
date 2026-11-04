@@ -77,10 +77,12 @@ List<SettingsModel> get videoSettings => [
   ),
   const SwitchModel(
     title: '线程撕裂者：海外节点',
-    subtitle: '默认开启，适合在海外观看；人在大陆可关闭，改用大陆节点。自定义节点为空时生效',
+    subtitle:
+        '默认关闭（与原版一致）：用大陆节点，冷门视频也有，海外看靠多线程补速度；'
+        '开启后只用海外节点，热门视频快，冷门视频常没缓存。自定义节点为空时生效',
     leading: Icon(Icons.public),
     setKey: SettingBoxKey.threadRipperOverseas,
-    defaultVal: true,
+    defaultVal: false,
   ),
   NormalModel(
     title: '线程撕裂者：并发数',
