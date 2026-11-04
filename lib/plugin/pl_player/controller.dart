@@ -1034,7 +1034,15 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
   /// [position] is where to resume.
   Future<void>? Function(Duration position)? onStreamBrokeOff;
 
-  ({int position, DateTime at})? _lastBreakOff;
+  ({int position, DateTime at, int count})? _lastBreakOff;
+
+  // Tries at one place: a network that is still coming back (just back from
+  // the background) gets a few seconds; a damaged file ends the third time.
+  static const _breakOffRetries = [
+    Duration.zero,
+    Duration(seconds: 2),
+    Duration(seconds: 5),
+  ];
 
   // The playhead as mpv last reported it, and when the app last moved it
   // (a seek, a file opened at a start position).
@@ -1058,15 +1066,17 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
   /// the history records the video as watched. A jump forward into the last
   /// two seconds that the app did not ask for is not passed on to the page:
   /// the end that follows resumes from before the jump. Positions stay held
-  /// while that recovery runs; a jump with no end after it is let through
-  /// after five seconds.
+  /// while that recovery runs (half a minute at most: a reopen that failed
+  /// must not freeze the playhead); a jump with no end after it is let
+  /// through after five seconds.
   bool _holdJumpToEnd(NativePlayer player, Duration position) {
     final from = _reportedPosition;
     _reportedPosition = position;
     final now = DateTime.now();
     if (_jumpToEnd case final jump?) {
-      if (jump.recovering ||
-          now.difference(jump.at) < const Duration(seconds: 5)) {
+      final held = now.difference(jump.at);
+      if (held < const Duration(seconds: 5) ||
+          (jump.recovering && held < const Duration(seconds: 30))) {
         return true;
       }
       _jumpToEnd = null;
@@ -1088,8 +1098,8 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
   /// while the app was in the background, or the thread-ripper proxy's
   /// socket that iOS reclaimed meanwhile. It reads that as the end, and the
   /// page would move on to the next video. An end well before the duration
-  /// resumes playback instead. A second one at the same place within a
-  /// minute is taken as the real end (a damaged file), so it cannot loop.
+  /// resumes playback instead (see [_recoverStream] for one that keeps
+  /// breaking off at the same place).
   bool _resumeIfStreamBrokeOff(NativePlayer player) {
     if (isLive || dataSource is FileSource) return false;
     final duration = player.state.duration;
@@ -1106,32 +1116,45 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
       return false;
     }
     if (jump != null) {
-      _jumpToEnd = (from: jump.from, at: jump.at, recovering: true);
+      _jumpToEnd = (from: jump.from, at: DateTime.now(), recovering: true);
     }
     return true;
   }
 
-  /// Reopens at [position] (see [onStreamBrokeOff]), unless the stream broke
-  /// off at the same place within the last minute: then it is left alone, so
-  /// that a damaged file cannot loop. Returns whether it reopened.
+  /// Reopens at [position] (see [onStreamBrokeOff]). Breaking off again at
+  /// the same place within a minute waits a little longer each time (see
+  /// [_breakOffRetries]); once those are used up it is left alone, so that a
+  /// damaged file cannot loop. Returns whether it reopens.
   bool _recoverStream(Duration position) {
     final now = DateTime.now();
-    if (_lastBreakOff case final last?
-        when now.difference(last.at) < const Duration(minutes: 1) &&
-            (position.inSeconds - last.position).abs() <= 5) {
+    final again = switch (_lastBreakOff) {
+      final last? =>
+        now.difference(last.at) < const Duration(minutes: 1) &&
+            (position.inSeconds - last.position).abs() <= 5,
+      null => false,
+    };
+    final count = again ? _lastBreakOff!.count + 1 : 1;
+    if (count > _breakOffRetries.length) {
       _lastBreakOff = null;
       return false;
     }
-    _lastBreakOff = (position: position.inSeconds, at: now);
+    _lastBreakOff = (position: position.inSeconds, at: now, count: count);
     SmartDialog.showToast(
-      '视频连接中断，正在恢复',
+      count == 1
+          ? '视频连接中断，正在恢复'
+          : '视频连接中断，正在重试（$count/${_breakOffRetries.length}）',
       displayTime: const Duration(milliseconds: 800),
     );
-    if (onStreamBrokeOff case final reopen?) {
-      reopen(position);
-    } else {
-      refreshPlayer(at: position);
-    }
+    // Not if another video (or none) is playing by then.
+    final generation = _ripperGeneration;
+    Future.delayed(_breakOffRetries[count - 1], () {
+      if (generation != _ripperGeneration || _playerCount == 0) return;
+      if (onStreamBrokeOff case final reopen?) {
+        reopen(position);
+      } else {
+        refreshPlayer(at: position);
+      }
+    });
     return true;
   }
 
