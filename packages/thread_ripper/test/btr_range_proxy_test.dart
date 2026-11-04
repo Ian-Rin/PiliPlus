@@ -20,6 +20,9 @@ void main() {
   late int active;
   late int peak;
   late List<Timer> timers;
+  // When each request for /lag reached the CDN: (range start, ms).
+  late List<(int, int)> lagArrivals;
+  final clock = Stopwatch()..start();
 
   setUp(() async {
     source = Uint8List.fromList(List.generate(1100000, (i) => (i * 37) % 251));
@@ -27,6 +30,7 @@ void main() {
     requests = [];
     interruptedEnds = {};
     timers = [];
+    lagArrivals = [];
     active = peak = 0;
     cdn = await HttpServer.bind(InternetAddress.loopbackIPv4, 0)
       ..listen((request) async {
@@ -44,6 +48,9 @@ void main() {
           );
           final (start, end) = range;
           requests.add((request.uri.path, start, end));
+          if (request.uri.path == '/lag') {
+            lagArrivals.add((start, clock.elapsedMilliseconds));
+          }
           if (request.uri.path == '/forbidden') {
             response.statusCode = 403;
             await response.close();
@@ -152,6 +159,11 @@ void main() {
               start > 0 &&
               start < 900000) {
             timers.add(Timer(const Duration(milliseconds: 200), send));
+          } else if (request.uri.path == '/lag' &&
+              start >= 65536 &&
+              start < 65536 + 128 * 1024) {
+            // The first audio window after the head is slow to arrive.
+            timers.add(Timer(const Duration(milliseconds: 800), send));
           } else if (request.uri.path == '/slow') {
             timers.add(Timer(const Duration(seconds: 3), send));
           } else {
@@ -165,7 +177,12 @@ void main() {
         }
       });
     client = HttpClient();
-    proxy = BtrRangeProxy(concurrency: 4, userAgent: 'test');
+    // Most tests count the requests a fetch makes: no heads in advance.
+    proxy = BtrRangeProxy(
+      concurrency: 4,
+      userAgent: 'test',
+      prefetchHeads: false,
+    );
     await proxy.start();
   });
 
@@ -426,6 +443,7 @@ void main() {
     var started = 0, aborted = 0;
     proxy = BtrRangeProxy(
       userAgent: 'test',
+      prefetchHeads: false,
       fetch: (url, request) {
         started++;
         request.signal.addListener(() => aborted++);
@@ -490,6 +508,57 @@ void main() {
     expect(proxy.playerIdle, isFalse);
     await subscription.cancel();
     socket.destroy();
+  });
+
+  // mpv opens an EDL's audio only once the video is open; both heads are
+  // fetched at once instead, before mpv asks for either.
+  test('register fetches every head before mpv asks', () async {
+    proxy.close();
+    proxy = BtrRangeProxy(concurrency: 4, userAgent: 'test');
+    await proxy.start();
+    final video = register(['/good']);
+    proxy.registerCandidates([endpoint('/good')], isAudio: true);
+    await Future<void>.delayed(const Duration(milliseconds: 300));
+    expect(requests, [('/good', 0, 65535), ('/good', 0, 65535)]);
+    final result = await fetch(video);
+    expect(result.$2, source);
+    // The request starts from the head already there.
+    expect(requests.where((r) => r.$2 == 0).length, 2);
+    expect(
+      (await fetch(video, method: 'HEAD')).$1.contentLength,
+      source.length,
+    );
+  });
+
+  test('a failed head in advance leaves the request its own probe', () async {
+    proxy.close();
+    proxy = BtrRangeProxy(concurrency: 4, userAgent: 'test');
+    await proxy.start();
+    final url = register(['/forbidden']);
+    await Future<void>.delayed(const Duration(milliseconds: 300));
+    final before = requests.length;
+    expect(before, greaterThan(0));
+    final result = await fetch(url);
+    expect(result.$1.statusCode, 502);
+    expect(requests.length, greaterThan(before));
+  });
+
+  // Waiting for a window to reach mpv before asking for the next left every
+  // connection idle for a round trip: too slow for fast playback.
+  test('the next window downloads while mpv takes the current one', () async {
+    final audio = proxy.registerCandidates([endpoint('/lag')], isAudio: true);
+    final result = await fetch(audio);
+    // The next window arrives first and waits for its turn.
+    expect(result.$2, source);
+    final firstMedia = lagArrivals
+        .where((r) => r.$1 >= 65536)
+        .map((r) => r.$2)
+        .reduce(min);
+    final ahead = lagArrivals
+        .where((r) => r.$1 >= 65536 + 128 * 1024)
+        .map((r) => r.$2)
+        .reduce(min);
+    expect(ahead - firstMedia, lessThan(600));
   });
 
   test('a copy resumes the live first copy on a different node', () async {

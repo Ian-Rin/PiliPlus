@@ -29,6 +29,7 @@ class BtrRangeProxy {
     this.autoConcurrency,
     required this.userAgent,
     this.referer = 'https://www.bilibili.com/',
+    this.prefetchHeads = true,
     RipperFetch? fetch,
   }) : _settings = RipperDownloadSettings(
          concurrency: concurrency,
@@ -48,6 +49,10 @@ class BtrRangeProxy {
   final RipperAutoConcurrency? autoConcurrency;
   final String userAgent;
   final String referer;
+
+  /// Whether [register] starts fetching each track's head (its length and
+  /// first 64 KiB) at once, before mpv asks for it.
+  final bool prefetchHeads;
   final RipperDownloadSettings _settings;
   late final RipperDownloader _downloader;
 
@@ -82,6 +87,10 @@ class BtrRangeProxy {
   }
 
   static const _idleAfter = Duration(milliseconds: 250);
+
+  // Below the 30 to 50 of the window mpv is waiting for: the next window
+  // only takes the connections the current one leaves free.
+  static const _aheadPriority = 20;
   bool _closed = false;
   HttpServer? _server;
   final String _token = List.generate(
@@ -133,7 +142,7 @@ class BtrRangeProxy {
       throw StateError('No download session or media candidates');
     }
     final id = '/$_token/${_tracks.length}';
-    _tracks[id] = _Track(
+    final track = _tracks[id] = _Track(
       RipperCdnResolverAdapter(
         RipperCdnResolver(
           urls,
@@ -145,7 +154,21 @@ class BtrRangeProxy {
       ),
       isAudio ? 'audio' : 'video',
     );
+    if (prefetchHeads) _prefetchHead(track);
     return 'http://127.0.0.1:${_server!.port}$id';
+  }
+
+  /// mpv opens an EDL's tracks one after the other: the audio only once the
+  /// video is open, its probe a few round trips after the video's. A browser's
+  /// player asks for both init segments at once; fetching every head here as
+  /// soon as the track is known does the same. A failure is forgotten: the
+  /// request probes again, and answers 502 if that fails too.
+  void _prefetchHead(_Track track) {
+    final job = RipperAbortController();
+    _jobs.add(job);
+    track.headLoad = _probe(track, job.signal, fromStart: true)
+        .then<void>((bytes) => track.head = bytes, onError: (Object _) {})
+        .whenComplete(() => _jobs.remove(job));
   }
 
   void close() {
@@ -189,29 +212,38 @@ class BtrRangeProxy {
         (_, false) => 2 * 1024 * 1024,
       };
 
-  /// Upstream's download() of the compatibility mode, for one window: a
-  /// start unless it carries on where the track's last window ended; every
-  /// piece checked against the window and the file before mpv gets it.
-  Future<void> _window(
+  /// Upstream's download() of the compatibility mode, for one window, with
+  /// every piece checked against the window and the file. [startup] is
+  /// upstream's `!following`: a request's first window, unless it carries on
+  /// where the track's last one ended (racing the head on every node, copying
+  /// each piece early).
+  ///
+  /// The window downloads at once and keeps its bytes until it is attached
+  /// (see _Window), so that the next one can download while mpv takes this
+  /// one. Upstream waits for the player to ask for the next segment, which a
+  /// browser does while it plays the last; between two windows that wait
+  /// left every connection idle and the next window a round trip behind,
+  /// too slow for fast playback on a distant CDN.
+  _Window _window(
     _Track track,
     RipperPiece window,
-    RipperAbortSignal signal,
-    Future<void> Function(Uint8List bytes) deliver,
-  ) async {
-    // Only a start gets the startup treatment (racing the head on every node,
-    // copying each piece early): the first media of a track, a seek, a retry.
-    final following = track.warmEnd != 0 && window.start == track.warmEnd;
+    RipperAbortSignal signal, {
+    required bool startup,
+    num? priority,
+  }) {
+    final result = _Window(window);
     var received = 0;
     int? total;
-    try {
-      final result = await _downloader.downloadRange(
+    Future<void> run() async {
+      final range = await _downloader.downloadRange(
         window,
         track.resolver,
         RipperRangeOptions(
           signal: signal,
           kind: track.kind,
-          startup: !following,
-          onOrderedChunk: (bytes, piece, fileTotal) async {
+          startup: startup,
+          priority: priority,
+          onOrderedChunk: (bytes, piece, fileTotal) {
             if (signal.aborted) throw abortError(signal.reason);
             if (piece.start != window.start + received ||
                 bytes.length != piece.length ||
@@ -223,20 +255,20 @@ class BtrRangeProxy {
             }
             total = fileTotal;
             received += bytes.length;
-            await deliver(bytes);
+            return result._take(bytes);
           },
         ),
       );
-      if (received != window.length || result.total != total) {
+      if (received != window.length || range.total != total) {
         throw RipperError('媒体 Range 长度不符');
       }
-      if (track.warmEnd != 0 || window.length > _probeBytes) {
-        track.warmEnd = window.end + 1;
-      }
-    } catch (_) {
-      track.warmEnd = 0;
-      rethrow;
     }
+
+    result._done = run();
+    // Seen by attach(); a window given up before that must not reach the
+    // app's zone as an unhandled error.
+    result._done.ignore();
+    return result;
   }
 
   /// The file's length, from a short "meta" range. From the file start it
@@ -321,7 +353,8 @@ class BtrRangeProxy {
 
     try {
       final header = request.headers.value(HttpHeaders.rangeHeader);
-      Uint8List? head;
+      if (track.headLoad case final load?) await _race(load, job.signal);
+      Uint8List? head = track.head;
       if (track.total == null) {
         head = await _probe(
           track,
@@ -364,13 +397,44 @@ class BtrRangeProxy {
           await deliver(Uint8List.sublistView(head, 0, last + 1));
           cursor = last + 1;
         }
-        var first = true;
-        while (cursor <= end) {
+        // One window ahead: it downloads while mpv takes the current one,
+        // queued behind it for connections (a lower priority).
+        RipperPiece windowAt(int from, {required bool first}) {
           final size = windowBytes(kind: track.kind, first: first);
-          final window = RipperPiece(0, cursor, min(end, cursor + size - 1));
-          await _window(track, window, job.signal, deliver);
-          cursor = window.end + 1;
-          first = false;
+          return RipperPiece(0, from, min(end, from + size - 1));
+        }
+
+        _Window? ahead;
+        if (cursor <= end) {
+          final window = windowAt(cursor, first: true);
+          ahead = _window(
+            track,
+            window,
+            job.signal,
+            startup: !(track.warmEnd != 0 && window.start == track.warmEnd),
+          );
+        }
+        while (ahead != null) {
+          final current = ahead;
+          final next = current.piece.end + 1;
+          ahead = next <= end
+              ? _window(
+                  track,
+                  windowAt(next, first: false),
+                  job.signal,
+                  startup: false,
+                  priority: _aheadPriority,
+                )
+              : null;
+          try {
+            await current.attach(deliver);
+          } catch (_) {
+            track.warmEnd = 0;
+            rethrow;
+          }
+          if (track.warmEnd != 0 || current.piece.length > _probeBytes) {
+            track.warmEnd = next;
+          }
         }
       }
       await _race(socket.close(), job.signal);
@@ -475,4 +539,41 @@ class _Track {
   /// The GET being served; a newer one replaces it.
   RipperAbortController? request;
   bool opened = false;
+
+  /// The head fetched when the track was registered: the first bytes of the
+  /// file, once [headLoad] has completed (null if that failed).
+  Future<void>? headLoad;
+  Uint8List? head;
+}
+
+/// One window's bytes on their way to mpv: kept in order until [attach],
+/// then handed over as they arrive.
+class _Window {
+  _Window(this.piece);
+
+  final RipperPiece piece;
+  late final Future<void> _done;
+  final _kept = <Uint8List>[];
+  Future<void> Function(Uint8List bytes)? _deliver;
+
+  Future<void> _take(Uint8List bytes) {
+    final deliver = _deliver;
+    if (deliver == null) {
+      _kept.add(bytes);
+      return Future.value();
+    }
+    return deliver(bytes);
+  }
+
+  /// Hands this window to mpv: what has arrived, then the rest as it comes.
+  /// Completes once all of it has been handed over.
+  Future<void> attach(Future<void> Function(Uint8List bytes) deliver) async {
+    // Bytes that arrive during a handover join the queue; the last check and
+    // the switch to [deliver] happen without a gap between them.
+    while (_kept.isNotEmpty) {
+      await deliver(_kept.removeAt(0));
+    }
+    _deliver = deliver;
+    await _done;
+  }
 }
