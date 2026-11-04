@@ -1,8 +1,8 @@
 import 'dart:convert';
 import 'dart:io';
 
-import 'package:PiliPlus/services/thread_ripper/auto_concurrency.dart';
-import 'package:flutter_test/flutter_test.dart';
+import 'package:test/test.dart';
+import 'package:thread_ripper/auto_concurrency.dart';
 
 void main() {
   final scenarios = jsonDecode(

@@ -29,8 +29,6 @@ import 'package:PiliPlus/plugin/pl_player/models/play_status.dart';
 import 'package:PiliPlus/plugin/pl_player/models/video_fit_type.dart';
 import 'package:PiliPlus/plugin/pl_player/utils/danmaku_options.dart';
 import 'package:PiliPlus/plugin/pl_player/utils/fullscreen.dart';
-import 'package:PiliPlus/services/thread_ripper/auto_concurrency.dart';
-import 'package:PiliPlus/services/thread_ripper/range_proxy.dart';
 import 'package:PiliPlus/services/service_locator.dart';
 import 'package:PiliPlus/utils/accounts.dart';
 import 'package:PiliPlus/utils/android/android_helper.dart';
@@ -69,6 +67,8 @@ import 'package:native_device_orientation/native_device_orientation.dart';
 import 'package:nativeapi/nativeapi.dart' as nativeapi show Size, Rectangle;
 import 'package:path/path.dart' as path;
 import 'package:screen_brightness_platform_interface/screen_brightness_platform_interface.dart';
+import 'package:thread_ripper/auto_concurrency.dart';
+import 'package:thread_ripper/range_proxy.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
 import 'package:window_manager/window_manager.dart';
 

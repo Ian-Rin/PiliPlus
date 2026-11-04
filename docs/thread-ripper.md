@@ -73,16 +73,17 @@ MIT 版权声明见 [许可证](licenses/bilibili-thread-ripper.txt)。
 - 保留独立的 URL 正确性修复及其测试：音频 CDN 绕过、P2P 地址切换时使用 HTTPS
   并清除非标准端口、缺少主机参数时的安全回退。这些代码不包含卡顿检测或自动轮换。
 
-回归测试：`flutter test test/thread_ripper_test.dart test/thread_ripper_auto_test.dart test/video_utils_test.dart`。
+下载核心是独立的纯 Dart 包 `packages/thread_ripper`（只依赖 `dart:io`），不用编译 Flutter 和原生插件。
+回归测试：在 `packages/thread_ripper` 下运行 `dart test`；主项目里相关的是 `flutter test test/video_utils_test.dart test/playurl_flags_test.dart`。
 测试使用本地 HTTP 服务模拟正常、慢、拒绝、错误 Range、截断、资源大小变化、取消、
 客户端断开和新请求取代旧请求。
 
 ## 与原版的对照验证
 
-`test/fixtures/ripper_resolver.json` 由原版 JavaScript 直接产生，覆盖两种地区的
+`packages/thread_ripper/test/fixtures/ripper_resolver.json` 由原版 JavaScript 直接产生，覆盖两种地区的
 候选生成、预热、成功/失败后的排序、采样过期和轮换；Dart 测试逐步核对这些结果。
 `ripper_assignments.json` 对照原版任务分配，`ripper_auto.json` 分场景对照自动并发试升/回退/限流/缓冲压力和起播加速。
-更新参考数据：`node tool/generate_ripper_resolver_fixture.cjs <上游源码目录>`。
+更新参考数据：`node packages/thread_ripper/tool/generate_ripper_resolver_fixture.cjs <上游源码目录>`（可在任意目录运行，结果写入包内的 `test/fixtures`）。
 另有八个并发读取同时遭遇媒体节点停滞的回归用例，验证救援仍能启动且本地活动请求不超过 8。
 
 2026-09-24：上述三个测试文件共 31 项通过，修改涉及的 Dart 文件静态检查通过。

@@ -1,0 +1,12 @@
+name: thread_ripper
+description: >-
+  Bilibili-thread-ripper download core for PiliPlus. Pure Dart (dart:io only),
+  so tests run with `dart test` without building Flutter or native plugins.
+publish_to: none
+version: 0.1.0
+
+environment:
+  sdk: ">=3.13.0 <4.0.0"
+
+dev_dependencies:
+  test: ^1.33.0

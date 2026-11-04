@@ -1,0 +1,3 @@
+# Internal package: the app's pubspec.lock pins its versions.
+pubspec.lock
+.dart_tool/

@@ -1,8 +1,11 @@
-// Run with the Bilibili-thread-ripper checkout at documented commit as argv[2].
+// Usage: node tool/generate_ripper_resolver_fixture.cjs <Bilibili-thread-ripper checkout>
+// The checkout may be a relative path. Fixtures are written to this package's test/fixtures.
 const path = require('node:path');
 const fs = require('node:fs');
 const vm = require('node:vm');
-const root = process.argv[2];
+if (!process.argv[2]) throw new Error('Pass the Bilibili-thread-ripper checkout directory');
+const root = path.resolve(process.argv[2]);
+const out = (name) => path.join(__dirname, '..', 'test', 'fixtures', name);
 let now = 100000;
 Date.now = () => now;
 require(path.join(root, 'src/range-core.js'));
@@ -42,7 +45,7 @@ for (const mode of ['overseas','mainland']) {
   record('rangeCandidates');
   fixtures.push({mode, representation, urls, steps});
 }
-fs.writeFileSync('test/fixtures/ripper_resolver.json', JSON.stringify(fixtures,null,2)+'\n');
+fs.writeFileSync(out('ripper_resolver.json'), JSON.stringify(fixtures,null,2)+'\n');
 
 // Expose the unchanged upstream assignment function only in this test VM.
 const source = fs.readFileSync(path.join(root, 'src/idm-downloader.js'), 'utf8');
@@ -57,7 +60,7 @@ for (const speeds of [[0,0,0,0], [1200000,600000,10000,0], [900000,300000,0,0], 
   const steps = [2,2,2,2,8,16].map(count=>({count,expected:downloader.assignPrimaries(urls,resolver,count)}));
   weighted.push({urls,speeds,steps});
 }
-fs.writeFileSync('test/fixtures/ripper_assignments.json', JSON.stringify(weighted,null,2)+'\n');
+fs.writeFileSync(out('ripper_assignments.json'), JSON.stringify(weighted,null,2)+'\n');
 
 const autoScenarios = [];
 function scenario(name, run) {
@@ -131,4 +134,4 @@ scenario('refusals cap the start and a restart keeps its base', (act) => {
 scenario('stalls climb the ladder to 64 and stop there', (act) => {
   for (let i=0;i<8;i++) act('stall',[],3000);
 });
-fs.writeFileSync('test/fixtures/ripper_auto.json',JSON.stringify(autoScenarios,null,2)+'\n');
+fs.writeFileSync(out('ripper_auto.json'),JSON.stringify(autoScenarios,null,2)+'\n');

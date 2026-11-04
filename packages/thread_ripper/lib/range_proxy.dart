@@ -6,8 +6,8 @@ import 'dart:io';
 import 'dart:math';
 import 'dart:typed_data';
 
-import 'package:PiliPlus/services/thread_ripper/auto_concurrency.dart';
-import 'package:PiliPlus/services/thread_ripper/cdn_resolver.dart';
+import 'package:thread_ripper/auto_concurrency.dart';
+import 'package:thread_ripper/cdn_resolver.dart';
 
 class RipperRangeProxy {
   RipperRangeProxy({
