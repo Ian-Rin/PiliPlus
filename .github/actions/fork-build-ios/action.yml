@@ -52,6 +52,8 @@ runs:
       shell: bash
       env:
         GH_TOKEN: ${{ github.token }}
+      # The shell runs with -e and pipefail: a grep that finds nothing, or a
+      # head that stops reading early, would end the step.
       run: |
         code="${version##*+}"
         name="${version%+*}"
@@ -59,7 +61,10 @@ runs:
         tag="v${name}-${code}"
         ipa="$(ls PiliPlus_ios_*.ipa)"
         git fetch -q --tags origin || true
-        previous="$(git tag -l 'v*' --sort=-creatordate | grep -vx "$tag" | head -1)"
+        previous=""
+        for t in $(git tag -l 'v*' --sort=-creatordate); do
+          if [ "$t" != "$tag" ]; then previous="$t"; break; fi
+        done
         notes="$RUNNER_TEMP/release-notes.md"
         {
           echo "iOS 未签名 ipa，提交 ${GITHUB_SHA::9}。"
@@ -67,11 +72,11 @@ runs:
           if [ -n "$previous" ]; then
             echo "自 $previous 以来："
             echo
-            git log --no-merges --format='- %s' "$previous..$GITHUB_SHA" | head -40
+            git log --no-merges --max-count=40 --format='- %s' "$previous..$GITHUB_SHA"
           else
             echo "最近的提交："
             echo
-            git log --no-merges --format='- %s' -15 "$GITHUB_SHA"
+            git log --no-merges --max-count=15 --format='- %s' "$GITHUB_SHA"
           fi
         } > "$notes"
         if gh release view "$tag" >/dev/null 2>&1; then
