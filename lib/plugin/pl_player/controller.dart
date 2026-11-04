@@ -631,6 +631,39 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
 
   bool visible = true;
 
+  DateTime? _backgroundSince;
+
+  /// iOS stops an app drawing while it is in the background. mpv plays on,
+  /// and back in the foreground the picture can stay on its last frame while
+  /// the sound goes on, until playback is paused and resumed (which sets the
+  /// picture going with the sound again). That is done here, once, for a
+  /// video that played on in the background for more than two seconds.
+  void onAppLifecycle(AppLifecycleState state) {
+    if (!Platform.isIOS) return;
+    if (state == .paused) {
+      _backgroundSince = DateTime.now();
+      return;
+    }
+    if (state != .resumed) return;
+    final since = _backgroundSince;
+    _backgroundSince = null;
+    final player = _videoPlayerController;
+    if (since == null ||
+        player == null ||
+        !player.state.playing ||
+        onlyPlayAudio.value ||
+        DateTime.now().difference(since) < const Duration(seconds: 2)) {
+      return;
+    }
+    () async {
+      await player.pause();
+      await Future<void>.delayed(const Duration(milliseconds: 100));
+      if (identical(_videoPlayerController, player) && _playerCount != 0) {
+        await player.play();
+      }
+    }();
+  }
+
   DeviceOrientation? _orientation;
   late final checkIsAutoRotate = Platform.isAndroid && mode != .gravity;
   StreamSubscription<OrientationParams>? _orientationListener;

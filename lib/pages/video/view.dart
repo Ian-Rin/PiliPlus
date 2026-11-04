@@ -187,7 +187,9 @@ class _VideoDetailPageVState extends State<VideoDetailPageV>
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     final isResume = state == .resumed;
-    final ctr = videoDetailController.plPlayerController..visible = isResume;
+    final ctr = videoDetailController.plPlayerController
+      ..visible = isResume
+      ..onAppLifecycle(state);
     if (isResume) {
       if (!ctr.showDanmaku) {
         introController.startTimer();

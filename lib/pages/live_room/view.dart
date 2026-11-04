@@ -214,6 +214,7 @@ class _LiveRoomPageState extends State<LiveRoomPage>
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
+    plPlayerController.onAppLifecycle(state);
     if (plPlayerController.visible = state == .resumed) {
       if (!plPlayerController.showDanmaku) {
         _liveRoomController
