@@ -3,7 +3,8 @@
 # - A failed build is tried once more (GitHub's Macs can be out of capacity:
 #   the job then fails without ever being picked up). A build cancelled by
 #   newer code is not retried.
-# The ipa is the run's artifact (iOS-release), at the bottom of the run page.
+# The ipa is the run's artifact (iOS-release), and a release: GitHub mails a
+# new release to the repository's watchers.
 name: Fork iOS build
 
 on:
@@ -20,6 +21,9 @@ concurrency:
   group: fork-ios-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: write
+
 jobs:
   build:
     name: Build
@@ -32,6 +36,8 @@ jobs:
 
       - name: Build
         uses: ./.github/actions/fork-build-ios
+        with:
+          release: "true"
 
   retry:
     name: Retry
@@ -47,3 +53,5 @@ jobs:
 
       - name: Build
         uses: ./.github/actions/fork-build-ios
+        with:
+          release: "true"

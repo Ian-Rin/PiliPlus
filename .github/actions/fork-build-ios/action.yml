@@ -5,6 +5,12 @@
 name: Build unsigned iOS IPA
 description: Flutter iOS release build without code signing, zipped as an ipa and uploaded.
 
+inputs:
+  release:
+    description: Also publish the ipa as a GitHub release, which mails the repository's watchers.
+    required: false
+    default: "false"
+
 runs:
   using: composite
   steps:
@@ -37,3 +43,41 @@ runs:
         archive: false
         name: iOS-release
         path: PiliPlus_ios_*.ipa
+
+    # One release per commit (the build number is the commit count). GitHub
+    # mails a new release to the repository's watchers, its owner among them;
+    # the ipa is a plain download there, without signing in.
+    - name: Publish release
+      if: inputs.release == 'true'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        code="${version##*+}"
+        name="${version%+*}"
+        name="${name%.lemontea}"
+        tag="v${name}-${code}"
+        ipa="$(ls PiliPlus_ios_*.ipa)"
+        git fetch -q --tags origin || true
+        previous="$(git tag -l 'v*' --sort=-creatordate | grep -vx "$tag" | head -1)"
+        notes="$RUNNER_TEMP/release-notes.md"
+        {
+          echo "iOS 未签名 ipa，提交 ${GITHUB_SHA::9}。"
+          echo
+          if [ -n "$previous" ]; then
+            echo "自 $previous 以来："
+            echo
+            git log --no-merges --format='- %s' "$previous..$GITHUB_SHA" | head -40
+          else
+            echo "最近的提交："
+            echo
+            git log --no-merges --format='- %s' -15 "$GITHUB_SHA"
+          fi
+        } > "$notes"
+        if gh release view "$tag" >/dev/null 2>&1; then
+          gh release upload "$tag" "$ipa" --clobber
+        else
+          gh release create "$tag" "$ipa" --target "$GITHUB_SHA" \
+            --title "PiliPlus $name ($code)" --notes-file "$notes"
+        fi
+        echo "已发布：$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/tag/$tag" >> "$GITHUB_STEP_SUMMARY"
