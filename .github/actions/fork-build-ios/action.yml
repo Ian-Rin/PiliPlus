@@ -69,7 +69,8 @@ runs:
       env:
         GH_TOKEN: ${{ github.token }}
       # The shell runs with -e and pipefail: a grep that finds nothing, or a
-      # head that stops reading early, would end the step.
+      # head that stops reading early, would end the step. gh is told the
+      # repository: it would otherwise pick one from the git remotes.
       run: |
         # The merge commit, when upstream was merged (HEAD is GITHUB_SHA otherwise).
         sha="$(git rev-parse HEAD)"
@@ -97,10 +98,10 @@ runs:
             git log --no-merges --max-count=15 --format='- %s' "$sha"
           fi
         } > "$notes"
-        if gh release view "$tag" >/dev/null 2>&1; then
-          gh release upload "$tag" "$ipa" --clobber
+        if gh release view -R "$GITHUB_REPOSITORY" "$tag" >/dev/null 2>&1; then
+          gh release upload -R "$GITHUB_REPOSITORY" "$tag" "$ipa" --clobber
         else
-          gh release create "$tag" "$ipa" --target "$sha" \
+          gh release create -R "$GITHUB_REPOSITORY" "$tag" "$ipa" --target "$sha" \
             --title "PiliPlus $name ($code)" --notes-file "$notes"
         fi
         echo "已发布：$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/tag/$tag" >> "$GITHUB_STEP_SUMMARY"

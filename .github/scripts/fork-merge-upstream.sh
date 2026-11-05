@@ -18,19 +18,21 @@ git config user.name "github-actions[bot]"
 git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 # The fork keeps its own README (.gitattributes: merge=ours).
 git config merge.ours.driver true
-git remote add upstream https://github.com/bggRGjQaUbCoE/PiliPlus.git 2>/dev/null || true
-git fetch -q upstream main
+# Not named "upstream": gh takes a remote of that name for the repository
+# it works on, and the release went to upstream's repository.
+git fetch -q https://github.com/bggRGjQaUbCoE/PiliPlus.git main
+git update-ref refs/remotes/piliplus/main FETCH_HEAD
 
-if git merge-base --is-ancestor upstream/main HEAD; then
+if git merge-base --is-ancestor piliplus/main HEAD; then
   echo "上游没有新提交，直接编译。" | tee /dev/stderr | summary
   exit 0
 fi
 
-commits="$(git log --oneline HEAD..upstream/main)"
+commits="$(git log --oneline HEAD..piliplus/main)"
 echo "上游的新提交："
 echo "$commits"
 
-workflows="$(git diff --name-only HEAD...upstream/main -- .github/workflows)"
+workflows="$(git diff --name-only HEAD...piliplus/main -- .github/workflows)"
 if [ -n "$workflows" ]; then
   {
     echo "上游有新提交，但改了工作流文件，编译用的令牌推不上去，这次不合并（交给每天的同步流程）："
@@ -42,7 +44,7 @@ if [ -n "$workflows" ]; then
 fi
 
 before="$(git rev-parse HEAD)"
-if ! git merge -q --no-edit upstream/main; then
+if ! git merge -q --no-edit piliplus/main; then
   {
     echo "**上游合并有冲突，这次不合并，只编译本仓库的代码。**冲突的文件："
     echo '```'

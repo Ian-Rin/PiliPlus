@@ -107,5 +107,6 @@ jobs:
         run: |
           git push origin HEAD:main
           # A push with GITHUB_TOKEN starts no workflow; a dispatch does.
-          gh workflow run fork-ios.yml --ref main
+          # gh is told the repository: it would take the "upstream" remote.
+          gh workflow run -R "$GITHUB_REPOSITORY" fork-ios.yml --ref main
           echo "已推送，iOS 编译已开始。" >> "$GITHUB_STEP_SUMMARY"
