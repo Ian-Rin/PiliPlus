@@ -3,6 +3,9 @@
 # - A build that no Mac ever picked up (GitHub's Macs can be out of capacity
 #   for hours) is tried once more. One that failed on a Mac (the code) and one
 #   cancelled by newer code are not.
+# - Nothing is built when the app would be the same as the last release's
+#   (the "Check" job, .github/scripts/fork-needs-build.sh); a run started by
+#   hand with "force" builds anyway.
 # The ipa is the run's artifact (iOS-release), and a release: GitHub mails a
 # new release to the repository's watchers.
 # Each build first merges upstream PiliPlus's new commits, if any (the "Sync
@@ -21,6 +24,11 @@ on:
       - "docs/**"
       - "tool/**"
   workflow_dispatch:
+    inputs:
+      force:
+        description: 即使和上一版相同也编译
+        type: boolean
+        default: false
 
 concurrency:
   group: fork-ios-${{ github.ref }}
@@ -30,8 +38,31 @@ permissions:
   contents: write
 
 jobs:
+  # On Linux, plentiful and quick: no Mac is waited for to find out that
+  # nothing needs building.
+  check:
+    name: Check
+    runs-on: ubuntu-latest
+    outputs:
+      build: ${{ steps.check.outputs.build }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Anything new to build
+        id: check
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FORCE: ${{ inputs.force }}
+        run: bash .github/scripts/fork-needs-build.sh
+
   build:
     name: Build
+    needs: check
+    if: needs.check.outputs.build == 'true'
     runs-on: macos-26
     outputs:
       on-a-mac: ${{ steps.mac.outputs.on-a-mac }}
@@ -67,9 +98,11 @@ jobs:
 
   retry:
     name: Retry
-    needs: build
+    needs: [check, build]
     # failure() is false for a build cancelled by newer code.
-    if: failure() && needs.build.outputs.on-a-mac != 'true'
+    if: >-
+      failure() && needs.check.outputs.build == 'true'
+      && needs.build.outputs.on-a-mac != 'true'
     runs-on: macos-26
     steps:
       - name: Checkout code
