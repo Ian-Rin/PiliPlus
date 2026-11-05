@@ -697,6 +697,7 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
         '丢帧 ${read('frame-drop-count')}/${read('decoder-frame-drop-count')} '
         '延迟帧 ${read('vo-delayed-frame-count')} '
         'vo ${read('vo-configured')} '
+        '视频轨 ${read('vid')} '
         '解码器 ${read('hwdec-current')}';
   }
 
@@ -718,8 +719,10 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     });
   }
 
-  /// Back in the foreground (iOS): the proxy checked on every return (its
-  /// socket may have been taken back), the hardware decoder rebuilt after
+  /// In the background (iOS) the video track is off
+  /// ([_videoOffInBackgroundSoon]). Back in the foreground: the proxy checked
+  /// on every return (its socket may have been taken back), the track turned
+  /// on again, or, where it stayed on, the hardware decoder rebuilt after
   /// more than two seconds away ([_reseedDecoder]), and the trip logged
   /// ([_bgTrace]) with mpv's video state at a few moments.
   void onAppLifecycle(AppLifecycleState state) {
@@ -727,18 +730,23 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     final player = _videoPlayerController;
     if (state == .paused) {
       _backgroundSince = DateTime.now();
+      // Time away counts in a startup still going: said, so it is not read
+      // as a slow start.
+      _startup?.mark('切到后台');
       if (player != null) {
         _bgTrace = _BackgroundTrace()
           ..mark(
             '切到后台 ${onlyPlayAudio.value ? '（只听声音）' : ''}'
             '${_videoState(player)}',
           );
+        _videoOffInBackgroundSoon(player);
       }
       return;
     }
     if (state != .resumed) return;
     final since = _backgroundSince;
     _backgroundSince = null;
+    if (since != null) _startup?.mark('回到前台');
     final trace = _bgTrace;
     // On every return, however short the time away (a cheap self-connect):
     // before mpv has played what it buffered and asks the proxy for more.
@@ -759,13 +767,23 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
       }
     }
     final away = since == null ? null : DateTime.now().difference(since);
-    if (away == null || player == null || away < const Duration(seconds: 2)) {
+    // Before the check of the time away: a track turned off is turned on
+    // again after however short a trip.
+    final videoBack = player != null && _videoBackOn(player);
+    if (away == null ||
+        player == null ||
+        (away < const Duration(seconds: 2) && !videoBack)) {
       return;
     }
     trace?.mark(
       '回到前台，离开 ${away.inSeconds}s ${_videoState(player)}',
     );
-    _reseedDecoder(player);
+    if (videoBack) {
+      trace?.mark('重新打开视频轨，用新的视频解码器');
+      _reseedIfSoftware(player);
+    } else {
+      _reseedDecoder(player);
+    }
     _sampleLater(player, const Duration(seconds: 1), '回来 1 秒');
     _sampleLater(player, const Duration(seconds: 3), '回来 3 秒');
     if (player.state.playing) {
@@ -834,6 +852,78 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     } catch (_) {
       return '?';
     }
+  }
+
+  /// The player whose video track [_videoOffInBackgroundSoon] turned off.
+  Player? _videoOffFor;
+
+  /// Frames decoded in the background fail (VideoToolbox -12903, within a
+  /// second of leaving) and mpv goes on with the software decoder. The
+  /// rebuild back in the foreground ([_reseedDecoder]) did not mend that
+  /// every time: logs showed the software decoder kept, and, paused, no
+  /// frame at all after it (playhead and frames decoded still, with the
+  /// cache ahead of the playhead). So no picture is decoded away: the video
+  /// track is turned off as 听视频 does, the sound plays on, and on return
+  /// turning it on has mpv build a whole new video decoder and start it at
+  /// the playhead. Not while the PiP window shows the picture.
+  void _videoOffInBackgroundSoon(Player player) {
+    final hw = hwdec;
+    if (onlyPlayAudio.value || hw == null || hw == 'no') return;
+    final since = _backgroundSince;
+    // PiP said active a moment after the app goes.
+    Future<void>.delayed(const Duration(milliseconds: 500), () {
+      if (since == null || !identical(_backgroundSince, since)) return;
+      if (!identical(_videoPlayerController, player) || _playerCount == 0) {
+        return;
+      }
+      if (IOSPipHelper.isActive || onlyPlayAudio.value) return;
+      try {
+        if (player.getProperty('vid') == 'no') return;
+        player.setProperty('file-local-options/vid', 'no');
+      } catch (_) {
+        return;
+      }
+      _videoOffFor = player;
+      _bgTrace?.mark('关掉视频轨（后台不解码画面）');
+    });
+  }
+
+  /// Turns on the track [_videoOffInBackgroundSoon] turned off: true if it
+  /// did. Not when another video has been loaded since (its track is on, and
+  /// its decoder may have failed in the background).
+  bool _videoBackOn(Player player) {
+    final off = _videoOffFor;
+    _videoOffFor = null;
+    if (!identical(off, player)) return false;
+    try {
+      if (player.getProperty('vid') != 'no') return false;
+      player.setProperty('file-local-options/vid', 'auto');
+    } catch (_) {
+      return false;
+    }
+    return true;
+  }
+
+  /// The PiP window shows the picture: a track turned off in the background
+  /// is turned on for it.
+  void onIOSPipActive() {
+    final player = _videoPlayerController;
+    if (player != null && _videoBackOn(player)) {
+      _bgTrace?.mark('画中画打开，重新打开视频轨');
+    }
+  }
+
+  /// The new video decoder should be the hardware one; if it is the
+  /// software one, the old rebuild.
+  void _reseedIfSoftware(Player player) {
+    Future<void>.delayed(const Duration(milliseconds: 1500), () {
+      if (!identical(_videoPlayerController, player) || _playerCount == 0) {
+        return;
+      }
+      if (_decoderNow(player) != 'no') return;
+      _bgTrace?.mark('新的视频解码器是软件解码，改用重建硬件解码器');
+      _reseedDecoder(player);
+    });
   }
 
   DeviceOrientation? _orientation;

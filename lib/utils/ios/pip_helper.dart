@@ -32,6 +32,7 @@ abstract final class IOSPipHelper {
       case 'onStateChanged':
         final args = call.arguments as Map;
         isActive = args['active'] as bool;
+        if (isActive) PlPlayerController.instance?.onIOSPipActive();
         final isResumed =
             WidgetsBinding.instance.lifecycleState == AppLifecycleState.resumed;
         if (args['error'] != null && isResumed) {
