@@ -5,6 +5,10 @@
 #   cancelled by newer code are not.
 # The ipa is the run's artifact (iOS-release), and a release: GitHub mails a
 # new release to the repository's watchers.
+# Each build first merges upstream PiliPlus's new commits, if any, and pushes
+# the merge to main once the build has succeeded (see the fork-build-ios
+# action). The daily sync (fork-sync-upstream.yml) starts a build when
+# upstream has something new and main has not moved.
 name: Fork iOS build
 
 on:
@@ -47,6 +51,7 @@ jobs:
         uses: ./.github/actions/fork-build-ios
         with:
           release: "true"
+          sync-upstream: "true"
 
   retry:
     name: Retry
@@ -64,3 +69,4 @@ jobs:
         uses: ./.github/actions/fork-build-ios
         with:
           release: "true"
+          sync-upstream: "true"
