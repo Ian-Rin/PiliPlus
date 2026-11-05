@@ -739,7 +739,8 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
           trace?.mark(switch (revival) {
             ProxyRevival.alive => '加速代理正常',
             ProxyRevival.relistened => '加速代理的端口被系统收回，已在原端口重新监听',
-            ProxyRevival.failed => '加速代理恢复失败（之后断流会换新代理重新加载）',
+            ProxyRevival.failed =>
+              '加速代理恢复失败（之后断流会换新代理重新加载）：${proxy.reviveError}',
           });
           // Worth a log entry however short the time away.
           if (revival != ProxyRevival.alive && trace != null && !trace.done) {

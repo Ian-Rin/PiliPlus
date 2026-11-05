@@ -150,40 +150,74 @@ class BtrRangeProxy {
   /// if it does not, listens again on the same port: the addresses mpv holds
   /// go on working, with every track's state (its file length, nodes, bans).
   /// [ProxyRevival.failed] when the port could not be had again; the caller
-  /// then reloads.
+  /// then reloads, and [reviveError] says why.
+  ///
+  /// The old socket is closed first, and closed through: Dart closes a
+  /// socket asynchronously, and a bind made before that is done found the
+  /// port still in use, now and then (a log showed one return relisten and a
+  /// later one fail). The bind is tried a few times over a second besides.
   Future<ProxyRevival> revive() async {
     final port = _port;
     if (_closed || port == null) return ProxyRevival.failed;
-    if (await _accepts(port)) return ProxyRevival.alive;
+    if (await _answers(port)) return ProxyRevival.alive;
     final old = _server;
     _server = null;
-    old?.close(force: true).then((_) {}, onError: (Object _) {});
-    try {
-      final server = await HttpServer.bind(InternetAddress.loopbackIPv4, port);
-      if (_closed) {
-        await server.close(force: true);
-        return ProxyRevival.failed;
+    if (old != null) {
+      try {
+        await old.close(force: true).timeout(const Duration(seconds: 1));
+      } catch (_) {}
+    }
+    Object? error;
+    for (var attempt = 0; attempt < _bindAttempts; attempt++) {
+      if (attempt > 0) await Future<void>.delayed(_bindRetryDelay);
+      if (_closed) return ProxyRevival.failed;
+      try {
+        final server = await HttpServer.bind(
+          InternetAddress.loopbackIPv4,
+          port,
+        );
+        if (_closed) {
+          await server.close(force: true);
+          return ProxyRevival.failed;
+        }
+        _listen(server);
+        reviveError = null;
+        return ProxyRevival.relistened;
+      } catch (e) {
+        error = e;
       }
-      _listen(server);
-      return ProxyRevival.relistened;
+    }
+    reviveError = '$error';
+    return ProxyRevival.failed;
+  }
+
+  /// Why the last [revive] could not listen again, for the logs.
+  String? reviveError;
+
+  static const _bindAttempts = 5;
+  static const _bindRetryDelay = Duration(milliseconds: 250);
+
+  /// Whether this server answers on [port]: an answer to a path only it
+  /// knows (its token's), not just a connection, which anything listening
+  /// on the port would take.
+  Future<bool> _answers(int port) async {
+    final client = HttpClient()
+      ..connectionTimeout = const Duration(milliseconds: 500);
+    try {
+      final request = await client.get('127.0.0.1', port, _alivePath);
+      final response = await request.close().timeout(
+        const Duration(seconds: 1),
+      );
+      response.listen(null).cancel().ignore();
+      return response.statusCode == HttpStatus.noContent;
     } catch (_) {
-      return ProxyRevival.failed;
+      return false;
+    } finally {
+      client.close(force: true);
     }
   }
 
-  static Future<bool> _accepts(int port) async {
-    try {
-      final socket = await Socket.connect(
-        InternetAddress.loopbackIPv4,
-        port,
-        timeout: const Duration(milliseconds: 500),
-      );
-      socket.destroy();
-      return true;
-    } catch (_) {
-      return false;
-    }
-  }
+  String get _alivePath => '/$_token/alive';
 
   /// For tests: what iOS does to a suspended app's listening socket.
   Future<void> debugDropListener() async => _server?.close(force: true);
@@ -380,6 +414,11 @@ class BtrRangeProxy {
   // HTTP: mpv's requests.
 
   Future<void> _serve(HttpRequest request) async {
+    if (request.uri.path == _alivePath) {
+      request.response.statusCode = HttpStatus.noContent;
+      await request.response.close();
+      return;
+    }
     final track = _tracks[request.uri.path];
     if (track == null || _closed) {
       request.response.statusCode = HttpStatus.notFound;

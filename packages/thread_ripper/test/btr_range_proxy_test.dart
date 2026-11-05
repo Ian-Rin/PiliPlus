@@ -626,6 +626,35 @@ void main() {
     );
   });
 
+  // The port can stay taken for a moment after the old socket goes (Dart
+  // closes sockets asynchronously); one bind attempt failed there.
+  test('revive waits for a port still in use for a moment', () async {
+    final url = register(['/good']);
+    expect((await fetch(url, range: 'bytes=0-99')).$2, source.sublist(0, 100));
+    final port = Uri.parse(url).port;
+    await proxy.debugDropListener();
+    final holder = await ServerSocket.bind(InternetAddress.loopbackIPv4, port);
+    // Past the alive check (up to a second), within the bind retries.
+    Timer(const Duration(milliseconds: 1500), holder.close);
+    expect(await proxy.revive(), ProxyRevival.relistened);
+    expect(proxy.reviveError, isNull);
+    expect(
+      (await fetch(url, range: 'bytes=100-199')).$2,
+      source.sublist(100, 200),
+    );
+  });
+
+  test('a port that stays taken fails, and says why', () async {
+    final url = register(['/good']);
+    expect((await fetch(url, range: 'bytes=0-99')).$2, source.sublist(0, 100));
+    final port = Uri.parse(url).port;
+    await proxy.debugDropListener();
+    final holder = await ServerSocket.bind(InternetAddress.loopbackIPv4, port);
+    addTearDown(holder.close);
+    expect(await proxy.revive(), ProxyRevival.failed);
+    expect(proxy.reviveError, isNotNull);
+  });
+
   test('a closed session does not come back', () async {
     proxy.close();
     expect(await proxy.revive(), ProxyRevival.failed);
