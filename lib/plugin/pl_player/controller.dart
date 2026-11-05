@@ -669,6 +669,9 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
   /// mpv's video state, for [_bgTrace]: how far the picture is behind the
   /// sound (avsync), frames decoded and dropped, whether the video output is
   /// set up. Synchronous reads, so only at a few moments, never per frame.
+  static String _seconds(Duration d) =>
+      '${(d.inMilliseconds / 1000).toStringAsFixed(1)}s';
+
   String _videoState(Player player) {
     String read(String name) {
       try {
@@ -683,6 +686,7 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     return '${state.playing ? '播放中' : '暂停'} '
         '位置 ${(state.position.inMilliseconds / 1000).toStringAsFixed(1)}s '
         '缓冲到 ${(state.buffer.inMilliseconds / 1000).toStringAsFixed(1)}s '
+        '时长 ${_seconds(state.duration)} '
         'avsync ${read('avsync')} '
         '解码帧 ${read('estimated-frame-number')} '
         '丢帧 ${read('frame-drop-count')}/${read('decoder-frame-drop-count')} '
@@ -1287,10 +1291,11 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     Duration(seconds: 5),
   ];
 
-  // The playhead as mpv last reported it, and when the app last moved it
-  // (a seek, a file opened at a start position).
+  // The playhead as mpv last reported it, and when and where the app last
+  // moved it (a seek, a file opened at a start position).
   Duration _reportedPosition = Duration.zero;
   DateTime _appMovedAt = DateTime(0);
+  Duration _appMovedTo = Duration.zero;
 
   /// A jump to the end held back (see [_holdJumpToEnd]): where playback was
   /// before it. [recovering] once the end that followed is being resumed.
@@ -1298,6 +1303,7 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
 
   void _appMovesPlayhead(Duration to) {
     _appMovedAt = DateTime.now();
+    _appMovedTo = to;
     _reportedPosition = to;
     _jumpToEnd = null;
     _lastGoodPosition = to;
@@ -1317,10 +1323,25 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
   /// while that recovery runs (half a minute at most: a reopen that failed
   /// must not freeze the playhead); a jump with no end after it is let
   /// through after five seconds.
+  ///
+  /// A jump the app asked for lands where it asked (within a few seconds,
+  /// ten seconds at most after the ask). Any jump in those ten seconds was
+  /// taken for the app's own before, and the seek back to where playback
+  /// was that rebuilds the decoder after the background (see
+  /// [_reseedDecoder]) let a jump to the end through then.
   bool _holdJumpToEnd(NativePlayer player, Duration position) {
     final from = _reportedPosition;
     _reportedPosition = position;
     final now = DateTime.now();
+    final askedFor =
+        now.difference(_appMovedAt) < const Duration(seconds: 10) &&
+        (position - _appMovedTo).abs() <= const Duration(seconds: 3);
+    if (!askedFor && (position - from).abs() > const Duration(seconds: 3)) {
+      _bgTrace?.mark(
+        '位置从 ${_seconds(from)} 跳到 ${_seconds(position)}（不是 App 发起的），'
+        '时长 ${_seconds(player.state.duration)}',
+      );
+    }
     if (_jumpToEnd case final jump?) {
       final held = now.difference(jump.at);
       if (held < const Duration(seconds: 5) ||
@@ -1333,7 +1354,7 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     if (isLive ||
         dataSource is FileSource ||
         duration <= Duration.zero ||
-        now.difference(_appMovedAt) < const Duration(seconds: 10) ||
+        askedFor ||
         position - from <= const Duration(seconds: 5) ||
         duration - position > const Duration(seconds: 2)) {
       return false;
@@ -1527,6 +1548,13 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
 
       ///completed
       stream.completed.listen((bool completed) {
+        if (completed) {
+          _bgTrace?.mark(
+            '播放器报告播完，位置 ${_seconds(player.state.position)}'
+            '${_jumpToEnd == null ? '' : '（跳到末尾前在 ${_seconds(_jumpToEnd!.from)}）'}'
+            ' / 时长 ${_seconds(player.state.duration)}',
+          );
+        }
         if (completed && _resumeIfStreamBrokeOff(player)) return;
         if (completed) {
           playerStatus = .completed;
@@ -1921,6 +1949,7 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
   // 双击播放、暂停
   Future<void> onDoubleTapCenter() async {
     if (!isLive && isCompleted) {
+      _appMovesPlayhead(Duration.zero);
       await videoPlayerController!.seek(Duration.zero);
       videoPlayerController!.play();
     } else {
