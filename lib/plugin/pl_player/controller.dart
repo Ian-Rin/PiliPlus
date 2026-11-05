@@ -75,6 +75,13 @@ import 'package:window_manager/window_manager.dart';
 typedef PlayCallback = Future<void>? Function();
 typedef PlayOwner = ({String tag, Type? type});
 
+/// A loadfile option value taken whole by mpv, commas and all: `%n%` with n
+/// the length in bytes.
+String _mpvQuoted(String value) => '%${utf8.encode(value).length}%$value';
+
+/// An http(s) address's query, in a log line.
+final _signedQuery = RegExp(r'(https?://[^\s?]+)\?\S*');
+
 /// How a video got to its first moving picture (see
 /// [PlPlayerController._traceStartup]).
 class _StartupTrace {
@@ -1152,9 +1159,14 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
       // A read that gets nothing for 15 s now fails, and reconnects. (The
       // thread-ripper proxy can be silent for a while too, as its own retries
       // run: up to 5.5 s for a first byte, 4 s for a stalled piece.)
+      // media_kit joins these with commas for loadfile, so a value with
+      // commas of its own goes in mpv's %length% quoting (as audio-files
+      // below): unquoted, only reconnect=1 reached ffmpeg, and mpv took the
+      // rest for options of its own ("option not found" on every open).
       if (dataSource is! FileSource && !isLive) ...{
-        'stream-lavf-o':
-            'reconnect=1,reconnect_on_network_error=1,reconnect_delay_max=4',
+        'stream-lavf-o': _mpvQuoted(
+          'reconnect=1,reconnect_on_network_error=1,reconnect_delay_max=4',
+        ),
         'network-timeout': '15',
       },
     };
@@ -1590,13 +1602,15 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
         }
       }),
       // mpv's own errors (release builds log only those) go to the in-app
-      // logs (设置 → 日志) as well: a stalled or frozen player otherwise
-      // leaves no trace. The playlist, which holds signed addresses, only in
-      // debug builds.
+      // logs (我的 → 设置 → 关于 → 错误日志) as well: a stalled or frozen
+      // player otherwise leaves no trace. The playlist, which holds signed
+      // addresses, only in debug builds; an address in mpv's own text without
+      // its query (the signature, the account's mid), as users paste these.
       stream.log.listen(((PlayerLog log) {
         if (log.level == 'error' || log.level == 'fatal') {
           Utils.reportError(
-            '${log.level}: ${log.prefix}: ${log.text}'
+            '${log.level}: ${log.prefix}: '
+            '${log.text.replaceAllMapped(_signedQuery, (m) => '${m[1]}?…')}'
             '${kDebugMode ? '\n${player.state.playlist}' : ''}',
             null,
           );
