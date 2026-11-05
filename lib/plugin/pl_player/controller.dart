@@ -110,11 +110,16 @@ class _StartupTrace {
 
 /// What the player did around a trip to the background (see
 /// [PlPlayerController.onAppLifecycle]): mpv's video state at a few moments,
-/// and the events in between. Logged to 设置 → 日志.
+/// and the events in between, mpv's warnings among them. Logged to 我的 →
+/// 设置 → 关于 → 错误日志.
 class _BackgroundTrace {
   final _clock = Stopwatch()..start();
   final _notes = <String>[];
   bool done = false;
+
+  /// mpv's warnings noted so far: a few say why a decoder could not be had,
+  /// and no more than that are let in.
+  int warnings = 0;
 
   void mark(String note) {
     if (done || _notes.length >= 40) return;
@@ -802,7 +807,33 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
       }
       _appMovesPlayhead(at);
       await player.seek(at);
+      // After a trip with playback going on, a log showed the decoder still
+      // the software one (hwdec-current no) after the change back, where a
+      // trip while paused had it back. Said, with mpv's warnings, and tried
+      // once more.
+      await Future<void>.delayed(const Duration(milliseconds: 1500));
+      if (!current() || _decoderNow(player) != 'no') return;
+      _bgTrace?.mark('硬件解码没有恢复（解码器 no），再重建一次');
+      try {
+        player.setProperty('hwdec', 'no');
+        await Future<void>.delayed(const Duration(milliseconds: 300));
+        if (!current()) return;
+        player.setProperty('hwdec', hw);
+      } catch (_) {
+        return;
+      }
+      await Future<void>.delayed(const Duration(milliseconds: 1500));
+      if (!current()) return;
+      _bgTrace?.mark('再次重建后，解码器 ${_decoderNow(player)}');
     }();
+  }
+
+  static String _decoderNow(Player player) {
+    try {
+      return player.getProperty('hwdec-current');
+    } catch (_) {
+      return '?';
+    }
   }
 
   DeviceOrientation? _orientation;
@@ -1083,7 +1114,10 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
 
     final player = await Player.create(
       configuration: PlayerConfiguration(
-        logLevel: kDebugMode ? .warn : .error,
+        // Warnings too: around a trip to the background they go to its log
+        // (see the log listener); mpv says there why a decoder could not be
+        // had. Only errors reach media_kit's error stream either way.
+        logLevel: .warn,
         options: opt,
       ),
     );
@@ -1648,8 +1682,19 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
             '${kDebugMode ? '\n${player.state.playlist}' : ''}',
             null,
           );
-        } else if (kDebugMode) {
-          debugPrint(log.toString());
+        } else {
+          final trace = _bgTrace;
+          if (log.level == 'warn' &&
+              trace != null &&
+              !trace.done &&
+              trace.warnings < 15) {
+            trace.warnings++;
+            trace.mark(
+              'mpv 警告 ${log.prefix}: '
+              '${log.text.replaceAllMapped(_signedQuery, (m) => '${m[1]}?…')}',
+            );
+          }
+          if (kDebugMode) debugPrint(log.toString());
         }
       })),
       stream.error.listen((String event) {
