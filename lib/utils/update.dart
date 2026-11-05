@@ -66,8 +66,23 @@ abstract final class Update {
           releaseCommit != null &&
           releaseCommit.isNotEmpty &&
           BuildConfig.commitHash != 'N/A';
+      // This fork's releases (fork-build-ios action): tag v{version}-{build
+      // number}, titled "PiliPlus 2.2.0 (5839)", which the checks below do
+      // not read (the build time one took every release, made after its
+      // build, for a newer one). The build number says it.
+      final int? forkBuild = data['tag_name'] is String
+          ? int.tryParse(
+              RegExp(r'^v?\d+\.\d+\.\d+-(\d+)$')
+                      .firstMatch(data['tag_name'] as String)
+                      ?.group(1) ??
+                  '',
+            )
+          : null;
       final bool isLatest;
-      if (currentUpstreamVersion != null && latestUpstreamVersion != null) {
+      if (forkBuild != null) {
+        isLatest = BuildConfig.versionCode >= forkBuild;
+      } else if (currentUpstreamVersion != null &&
+          latestUpstreamVersion != null) {
         final bool hasOfficialUpdate =
             currentUpstreamVersion != latestUpstreamVersion;
         isLatest = isAuto
