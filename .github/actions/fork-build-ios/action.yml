@@ -10,8 +10,8 @@ inputs:
     description: Also publish the ipa as a GitHub release, which mails the repository's watchers.
     required: false
     default: "false"
-  sync-upstream:
-    description: Merge upstream PiliPlus's new commits before building, and push the merge to main once the build has succeeded.
+  push-merge:
+    description: Push the checkout's upstream merge (made by fork-ios.yml's "Sync upstream" step) to main once the build has succeeded.
     required: false
     default: "false"
 
@@ -23,62 +23,6 @@ runs:
       with:
         channel: stable
         flutter-version-file: pubspec.yaml
-
-    # Nothing new upstream: the build goes on as it is. A merge that
-    # conflicts, or breaks thread-ripper's tests, is left out (the build goes
-    # on without it; the run's page says why), as is one that changes
-    # upstream's workflow files, which GITHUB_TOKEN may not push: the daily
-    # sync (fork-sync-upstream.yml) reports those. The merge reaches main only
-    # after the build (see "Push the upstream merge").
-    - name: Merge upstream
-      id: upstream
-      if: inputs.sync-upstream == 'true'
-      shell: bash
-      run: |
-        git config user.name "github-actions[bot]"
-        git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-        # The fork keeps its own README (.gitattributes: merge=ours).
-        git config merge.ours.driver true
-        git remote add upstream https://github.com/bggRGjQaUbCoE/PiliPlus.git 2>/dev/null || true
-        git fetch -q upstream main
-        if git merge-base --is-ancestor upstream/main HEAD; then
-          echo "上游没有新提交，直接编译。" >> "$GITHUB_STEP_SUMMARY"
-          exit 0
-        fi
-        commits="$(git log --oneline HEAD..upstream/main)"
-        workflows="$(git diff --name-only HEAD...upstream/main -- .github/workflows)"
-        if [ -n "$workflows" ]; then
-          {
-            echo "上游有新提交，但改了工作流文件，编译用的令牌推不上去，这次不合并（交给每天的同步流程）："
-            echo '```'
-            echo "$workflows"
-            echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
-          exit 0
-        fi
-        before="$(git rev-parse HEAD)"
-        if ! git merge -q --no-edit upstream/main; then
-          {
-            echo "**上游合并有冲突，这次不合并，只编译本仓库的代码。**冲突的文件："
-            echo '```'
-            git diff --name-only --diff-filter=U
-            echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
-          git merge --abort
-          exit 0
-        fi
-        if ! (cd packages/thread_ripper && dart pub get && dart test); then
-          echo "**合并上游后线程撕裂者的测试失败，这次不合并，只编译本仓库的代码。**" >> "$GITHUB_STEP_SUMMARY"
-          git reset -q --hard "$before"
-          exit 0
-        fi
-        {
-          echo "已合并上游的新提交（编译成功后推送到 main）："
-          echo '```'
-          echo "$commits"
-          echo '```'
-        } >> "$GITHUB_STEP_SUMMARY"
-        echo "merged=true" >> "$GITHUB_OUTPUT"
 
     - name: Set and Extract version
       shell: pwsh
@@ -106,7 +50,7 @@ runs:
 
     # With GITHUB_TOKEN: its push starts no new build of the same code.
     - name: Push the upstream merge
-      if: steps.upstream.outputs.merged == 'true'
+      if: inputs.push-merge == 'true'
       shell: bash
       run: |
         if git push -q origin HEAD:main; then
