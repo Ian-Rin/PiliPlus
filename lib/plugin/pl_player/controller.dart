@@ -719,7 +719,7 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     });
   }
 
-  /// In the background (iOS) the video track is off
+  /// Playing in the background (iOS), the video track is off
   /// ([_videoOffInBackgroundSoon]). Back in the foreground: the proxy checked
   /// on every return (its socket may have been taken back), the track turned
   /// on again, or, where it stayed on, the hardware decoder rebuilt after
@@ -854,43 +854,91 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     }
   }
 
-  /// The player whose video track [_videoOffInBackgroundSoon] turned off.
+  /// The player whose video track [_videoOff] turned off.
   Player? _videoOffFor;
+
+  /// Turns the track back on when the app comes back, should the page not
+  /// say so ([onAppLifecycle] is told by the video page only while it is
+  /// on top): a log showed a trip begun with the track already off.
+  AppLifecycleListener? _resumeWatch;
 
   /// Frames decoded in the background fail (VideoToolbox -12903, within a
   /// second of leaving) and mpv goes on with the software decoder. The
   /// rebuild back in the foreground ([_reseedDecoder]) did not mend that
   /// every time: logs showed the software decoder kept, and, paused, no
   /// frame at all after it (playhead and frames decoded still, with the
-  /// cache ahead of the playhead). So no picture is decoded away: the video
-  /// track is turned off as 听视频 does, the sound plays on, and on return
-  /// turning it on has mpv build a whole new video decoder and start it at
-  /// the playhead. Not while the PiP window shows the picture.
+  /// cache ahead of the playhead). So no picture is decoded away while
+  /// playing there: the video track is turned off as 听视频 does, the sound
+  /// plays on, and on return turning it on has mpv build a whole new video
+  /// decoder and start it at the playhead.
+  ///
+  /// Only when playing: a track turned on again starts from the network (the
+  /// cache drops a track turned off), and logs of trips taken paused showed
+  /// that wait, 3 to 4 s of still picture once played, where the rebuild
+  /// gets its picture from the cache. Paused, the app sleeps and decodes
+  /// nothing; this timer then runs only on the way back, too late to count.
   void _videoOffInBackgroundSoon(Player player) {
-    final hw = hwdec;
-    if (onlyPlayAudio.value || hw == null || hw == 'no') return;
     final since = _backgroundSince;
     // PiP said active a moment after the app goes.
     Future<void>.delayed(const Duration(milliseconds: 500), () {
       if (since == null || !identical(_backgroundSince, since)) return;
-      if (!identical(_videoPlayerController, player) || _playerCount == 0) {
+      if (DateTime.now().difference(since) > const Duration(seconds: 2)) {
         return;
       }
-      if (IOSPipHelper.isActive || onlyPlayAudio.value) return;
-      try {
-        if (player.getProperty('vid') == 'no') return;
-        player.setProperty('file-local-options/vid', 'no');
-      } catch (_) {
-        return;
-      }
-      _videoOffFor = player;
-      _bgTrace?.mark('关掉视频轨（后台不解码画面）');
+      if (player.state.playing) _videoOff(player, '后台在播放，关掉视频轨（不解码画面）');
     });
   }
 
-  /// Turns on the track [_videoOffInBackgroundSoon] turned off: true if it
-  /// did. Not when another video has been loaded since (its track is on, and
-  /// its decoder may have failed in the background).
+  /// Playback started in the background (from the lock screen, say), after
+  /// [_videoOffInBackgroundSoon] looked.
+  void _videoOffIfAway(Player player) {
+    final since = _backgroundSince;
+    // The app's own state too: a return the video page was not told of
+    // leaves [_backgroundSince] set.
+    if (since == null ||
+        WidgetsBinding.instance.lifecycleState == AppLifecycleState.resumed ||
+        DateTime.now().difference(since) < const Duration(milliseconds: 600)) {
+      return;
+    }
+    _videoOff(player, '在后台开始播放，关掉视频轨（不解码画面）');
+  }
+
+  /// Not while the PiP window shows the picture.
+  void _videoOff(Player player, String note) {
+    final hw = hwdec;
+    if (onlyPlayAudio.value || hw == null || hw == 'no') return;
+    if (!identical(_videoPlayerController, player) || _playerCount == 0) {
+      return;
+    }
+    if (IOSPipHelper.isActive || identical(_videoOffFor, player)) return;
+    try {
+      if (player.getProperty('vid') == 'no') return;
+      player.setProperty('file-local-options/vid', 'no');
+    } catch (_) {
+      return;
+    }
+    _videoOffFor = player;
+    _bgTrace?.mark(note);
+    _resumeWatch ??= AppLifecycleListener(
+      // After the pages have been told.
+      onResume: () => Timer.run(() {
+        final player = _videoPlayerController;
+        if (player != null && _videoBackOn(player)) {
+          _bgTrace?.mark('回到前台（视频页没收到），重新打开视频轨');
+        }
+        _endResumeWatch();
+      }),
+    );
+  }
+
+  void _endResumeWatch() {
+    _resumeWatch?.dispose();
+    _resumeWatch = null;
+  }
+
+  /// Turns on the track [_videoOff] turned off: true if it did. Not when
+  /// another video has been loaded since (its track is on, and its decoder
+  /// may have failed in the background).
   bool _videoBackOn(Player player) {
     final off = _videoOffFor;
     _videoOffFor = null;
@@ -1632,6 +1680,9 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
         if (playing) {
           _startup?.mark('开始播放', once: 'playing');
           _bgTrace?.mark('开始播放');
+          if (Platform.isIOS && _videoPlayerController != null) {
+            _videoOffIfAway(_videoPlayerController!);
+          }
           if (_traceNextPlay) {
             _traceNextPlay = false;
             if (_videoPlayerController case final player?) {
@@ -2382,6 +2433,8 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     if (Platform.isAndroid) {
       AndroidHelper$ToDart.onUserLeaveHint = null;
     } else if (Platform.isIOS) {
+      _endResumeWatch();
+      _videoOffFor = null;
       IOSPipHelper.dispose();
     }
     _timer?.cancel();
