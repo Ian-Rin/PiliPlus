@@ -730,6 +730,7 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     final player = _videoPlayerController;
     if (state == .paused) {
       _backgroundSince = DateTime.now();
+      _reseedOnResume = null;
       // Time away counts in a startup still going: said, so it is not read
       // as a slow start.
       _startup?.mark('切到后台');
@@ -743,46 +744,67 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
       }
       return;
     }
+    // On the way back, inactive comes as the app starts to show (the
+    // switcher's animation), resumed once it is up. The proxy and the
+    // video track need the network, so they start at the first.
+    if (state == .inactive) {
+      _backFromAway(player);
+      return;
+    }
     if (state != .resumed) return;
+    _backFromAway(player); // inactive missed
+    final reseed = _reseedOnResume;
+    _reseedOnResume = null;
+    if (reseed != null && identical(reseed, _videoPlayerController)) {
+      _bgTrace?.mark('回到前台');
+      _reseedDecoder(reseed);
+    }
+  }
+
+  /// A rebuild of the decoder waits for resumed: it decodes from the cache
+  /// at once, and frames decoded before the app is up may fail as in the
+  /// background.
+  Player? _reseedOnResume;
+
+  void _backFromAway(Player? player) {
     final since = _backgroundSince;
+    if (since == null) return;
     _backgroundSince = null;
-    if (since != null) _startup?.mark('回到前台');
+    _endResumeWatch();
+    _startup?.mark('回到前台');
     final trace = _bgTrace;
     // On every return, however short the time away (a cheap self-connect):
     // before mpv has played what it buffered and asks the proxy for more.
-    if (since != null) {
-      if (_ripperProxy case final proxy?) {
-        proxy.revive().then((revival) {
-          trace?.mark(switch (revival) {
-            ProxyRevival.alive => '加速代理正常',
-            ProxyRevival.relistened => '加速代理的端口被系统收回，已在原端口重新监听',
-            ProxyRevival.failed =>
-              '加速代理恢复失败（之后断流会换新代理重新加载）：${proxy.reviveError}',
-          });
-          // Worth a log entry however short the time away.
-          if (revival != ProxyRevival.alive && trace != null && !trace.done) {
-            _reportBackgroundLater(const Duration(seconds: 6));
-          }
+    if (_ripperProxy case final proxy?) {
+      proxy.revive().then((revival) {
+        trace?.mark(switch (revival) {
+          ProxyRevival.alive => '加速代理正常',
+          ProxyRevival.relistened => '加速代理的端口被系统收回，已在原端口重新监听',
+          ProxyRevival.failed =>
+            '加速代理恢复失败（之后断流会换新代理重新加载）：${proxy.reviveError}',
         });
-      }
+        // Worth a log entry however short the time away.
+        if (revival != ProxyRevival.alive && trace != null && !trace.done) {
+          _reportBackgroundLater(const Duration(seconds: 6));
+        }
+      });
     }
-    final away = since == null ? null : DateTime.now().difference(since);
+    final away = DateTime.now().difference(since);
     // Before the check of the time away: a track turned off is turned on
     // again after however short a trip.
     final videoBack = player != null && _videoBackOn(player);
-    if (away == null ||
-        player == null ||
+    if (player == null ||
         (away < const Duration(seconds: 2) && !videoBack)) {
       return;
     }
     trace?.mark(
-      '回到前台，离开 ${away.inSeconds}s ${_videoState(player)}',
+      '开始回到前台，离开 ${away.inSeconds}s ${_videoState(player)}',
     );
     if (videoBack) {
       trace?.mark('重新打开视频轨，用新的视频解码器');
       _reseedIfSoftware(player);
     } else {
-      _reseedDecoder(player);
+      _reseedOnResume = player;
     }
     _sampleLater(player, const Duration(seconds: 1), '回来 1 秒');
     _sampleLater(player, const Duration(seconds: 3), '回来 3 秒');
@@ -920,11 +942,11 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     _videoOffFor = player;
     _bgTrace?.mark(note);
     _resumeWatch ??= AppLifecycleListener(
-      // After the pages have been told.
-      onResume: () => Timer.run(() {
-        final player = _videoPlayerController;
-        if (player != null && _videoBackOn(player)) {
-          _bgTrace?.mark('回到前台（视频页没收到），重新打开视频轨');
+      // After the pages have been told (nothing left to do then).
+      onShow: () => Timer.run(() {
+        if (_backgroundSince != null) {
+          _bgTrace?.mark('视频页没收到回到前台');
+          _backFromAway(_videoPlayerController);
         }
         _endResumeWatch();
       }),
