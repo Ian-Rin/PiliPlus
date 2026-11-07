@@ -83,8 +83,12 @@ String _mpvQuoted(String value) => '%${utf8.encode(value).length}%$value';
 final _signedQuery = RegExp(r'(https?://[^\s?]+)\?\S*');
 
 /// How a video got to its first moving picture (see
-/// [PlPlayerController._traceStartup]).
+/// [PlPlayerController._traceStartup]), or a seek back to a moving one (see
+/// [PlPlayerController._traceSeek]), [kind] saying which.
 class _StartupTrace {
+  _StartupTrace([this.kind = '起播耗时']);
+
+  final String kind;
   final _clock = Stopwatch()..start();
   final _notes = <String>[];
   final _once = <String>{};
@@ -105,7 +109,7 @@ class _StartupTrace {
     if (_notes.length < 40) _notes.add('${elapsed}ms $note');
   }
 
-  String get report => '[起播耗时] $label，共 ${elapsed}ms\n${_notes.join('\n')}';
+  String get report => '[$kind] $label，共 ${elapsed}ms\n${_notes.join('\n')}';
 }
 
 /// What the player did around a trip to the background (see
@@ -1124,6 +1128,10 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     try {
       _processing = true;
       final trace = _startup = _StartupTrace();
+      // A seek in the video before is over.
+      if (_seekTrace case final seek? when !seek.done) {
+        _endSeekTrace(seek, report: false);
+      }
       // A new video is not the one that was in the background.
       _traceNextPlay = false;
       // A start that never comes (loading forever) is logged too, with how
@@ -1477,6 +1485,75 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     if (trace.elapsed >= 1500) Utils.reportError(trace.report);
   }
 
+  /// A seek asked for by the user (the progress bar, a gesture, a time in a
+  /// comment) until the picture moves again from there, or, paused, until
+  /// the data is there: logged when that took 2 s or more, or did not happen
+  /// in 15 s. Seeks made in a row are one trace. Logs only showed a seek
+  /// after the fact (the playhead at the new place, the cache stuck at the
+  /// old), not where the time went.
+  _StartupTrace? _seekTrace;
+  Duration _seekTarget = Duration.zero;
+
+  void _traceSeek(Player player, Duration to) {
+    if (isLive) return;
+    // A start still going traces this too.
+    if (_startup case final startup? when !startup.done) return;
+    _seekTarget = to;
+    if (_seekTrace case final trace? when !trace.done) {
+      trace.mark('又跳到 ${_seconds(to)}');
+      return;
+    }
+    final trace = _seekTrace = _StartupTrace('拖动耗时')
+      ..label =
+          '${_ripperProxy != null ? '线程撕裂者' : '直连'}，'
+          '从 ${_seconds(player.state.position)} 跳到 ${_seconds(to)}'
+      ..mark('跳转前 ${_videoState(player)}');
+    _ripperProxy?.onTrace = trace.mark;
+    for (final after in const [1, 3, 6]) {
+      Future<void>.delayed(Duration(seconds: after), () {
+        if (trace.done || !identical(_videoPlayerController, player)) return;
+        trace.mark('$after 秒 ${_videoState(player)}');
+      });
+    }
+    Future<void>.delayed(const Duration(seconds: 15), () {
+      if (trace.done || !identical(_seekTrace, trace)) return;
+      trace.mark('15 秒内没有恢复');
+      _endSeekTrace(trace, report: true);
+    });
+  }
+
+  void _endSeekTrace(_StartupTrace trace, {required bool report}) {
+    trace.done = true;
+    if (identical(_ripperProxy?.onTrace, trace.mark)) {
+      _ripperProxy?.onTrace = null;
+    }
+    if (report) Utils.reportError(trace.report);
+  }
+
+  /// Playing: the playhead just past the target with no spinner. Paused: the
+  /// cache reaching just past it. Values from before the seek are far from
+  /// the target (a seek back) or short of it (forward), hence the windows.
+  void _seekProgress(Player player) {
+    final trace = _seekTrace;
+    if (trace == null || trace.done) return;
+    final state = player.state;
+    if (state.buffering) return;
+    bool justPast(Duration value, Duration within) =>
+        value >= _seekTarget + const Duration(milliseconds: 300) &&
+        value <= _seekTarget + within;
+    if (state.playing) {
+      if (!justPast(state.position, const Duration(seconds: 5))) return;
+      trace.mark('画面开始走 ${_seconds(state.position)}');
+    } else {
+      if ((state.position - _seekTarget).abs() > const Duration(seconds: 1) ||
+          !justPast(state.buffer, const Duration(seconds: 30))) {
+        return;
+      }
+      trace.mark('暂停中，数据已到 ${_seconds(state.buffer)}');
+    }
+    _endSeekTrace(trace, report: trace.elapsed >= 2000);
+  }
+
   // Tries at one place: a network that is still coming back (just back from
   // the background) gets a few seconds; a damaged file ends the third time.
   static const _breakOffRetries = [
@@ -1770,6 +1847,7 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
         if (_holdJumpToEnd(player, position)) return;
         if (position > Duration.zero) _lastGoodPosition = position;
         _traceStartup(position);
+        _seekProgress(player);
         _ripperProxy?.autoConcurrency?.buffer(
           // Seconds of playback left, not of media: at 2x the buffer lasts
           // half as long, and the thresholds (more threads under 6 s, fewer
@@ -1814,10 +1892,13 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
       }),
       stream.buffer.listen((Duration buffer) {
         buffered.value = buffer.inSeconds;
+        _seekProgress(player);
       }),
       stream.buffering.listen((bool buffering) {
         _startup?.mark(buffering ? '开始转圈' : '转圈结束');
         _bgTrace?.mark(buffering ? '开始转圈' : '转圈结束');
+        _seekTrace?.mark(buffering ? '开始转圈' : '转圈结束');
+        if (!buffering) _seekProgress(player);
         if (buffering &&
             !isBuffering.value &&
             !_ripperRestarting &&
@@ -1964,6 +2045,9 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
       position = Duration.zero;
     }
     _heartDuration = position.inSeconds;
+    if (_videoPlayerController case final player?) {
+      _traceSeek(player, position);
+    }
 
     if (duration.value != 0) {
       seek(position, isSeek: isSeek);
