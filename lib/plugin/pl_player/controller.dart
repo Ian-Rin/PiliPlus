@@ -117,6 +117,8 @@ class _StartupTrace {
 /// and the events in between, mpv's warnings among them. Logged to 我的 →
 /// 设置 → 关于 → 错误日志.
 class _BackgroundTrace {
+  _BackgroundTrace([this.kind = '后台切换']);
+  final String kind;
   final _clock = Stopwatch()..start();
   final _notes = <String>[];
   bool done = false;
@@ -132,7 +134,7 @@ class _BackgroundTrace {
     );
   }
 
-  String get report => '[后台切换]\n${_notes.join('\n')}';
+  String get report => '[$kind]\n${_notes.join('\n')}';
 }
 
 class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
@@ -735,6 +737,8 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     if (state == .paused) {
       _backgroundSince = DateTime.now();
       _reseedOnResume = null;
+      _hwFailedAway = false;
+      _hwFailWatch?.cancel();
       // Time away counts in a startup still going: said, so it is not read
       // as a slow start.
       _startup?.mark('切到后台');
@@ -744,7 +748,7 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
             '切到后台 ${onlyPlayAudio.value ? '（只听声音）' : ''}'
             '${_videoState(player)}',
           );
-        _videoOffInBackgroundSoon(player);
+        _videoOffInBackgroundSoon(player, '后台播放超过 5 秒，关掉视频轨（不解码画面）');
       }
       return;
     }
@@ -797,12 +801,20 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     // Before the check of the time away: a track turned off is turned on
     // again after however short a trip.
     final videoBack = player != null && _videoBackOn(player);
+    // A log showed a trip of under two seconds, paused, and play pressed
+    // back in the app: the decoder failed then, and the picture stood still
+    // with the sound going on. A failure mpv reported while away has the
+    // decoder rebuilt however short the trip; one after the return is
+    // caught as it comes ([_onHwDecodeFailed]).
+    final hwFailed = _hwFailedAway;
+    _hwFailedAway = false;
     if (player == null ||
-        (away < const Duration(seconds: 2) && !videoBack)) {
+        (away < const Duration(seconds: 2) && !videoBack && !hwFailed)) {
       return;
     }
     trace?.mark(
-      '开始回到前台，离开 ${away.inSeconds}s ${_videoState(player)}',
+      '开始回到前台，离开 ${away.inSeconds}s ${_videoState(player)}'
+      '${hwFailed && !videoBack ? '（离开时硬件解码失败过）' : ''}',
     );
     if (videoBack) {
       trace?.mark('重新打开视频轨，用新的视频解码器');
@@ -834,42 +846,120 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
   void _reseedDecoder(Player player) {
     final hw = hwdec;
     if (onlyPlayAudio.value || hw == null || hw == 'no') return;
+    if (_reseeding) return;
+    _reseeding = true;
     () async {
       bool current() =>
           identical(_videoPlayerController, player) && _playerCount != 0;
-      final at = player.state.position;
-      _bgTrace?.mark(
-        '重建硬件解码器，从 ${(at.inMilliseconds / 1000).toStringAsFixed(1)}s 前的关键帧重新解码',
-      );
       try {
-        player.setProperty('hwdec', 'no');
-        await Future<void>.delayed(const Duration(milliseconds: 300));
-        if (!current()) return;
-        player.setProperty('hwdec', hw);
-      } catch (_) {
-        return;
+        _bgTrace?.mark(
+          '重建硬件解码器，从 ${_seconds(player.state.position)} 前的关键帧重新解码',
+        );
+        try {
+          player.setProperty('hwdec', 'no');
+          await Future<void>.delayed(const Duration(milliseconds: 300));
+          if (!current()) return;
+          player.setProperty('hwdec', hw);
+        } catch (_) {
+          return;
+        }
+        // Where playback is now: playing, it went on for those 300 ms.
+        final at = player.state.position;
+        _appMovesPlayhead(at);
+        await player.seek(at);
+      } finally {
+        _reseeding = false;
       }
-      _appMovesPlayhead(at);
-      await player.seek(at);
-      // After a trip with playback going on, a log showed the decoder still
-      // the software one (hwdec-current no) after the change back, where a
-      // trip while paused had it back. Said, with mpv's warnings, and tried
-      // once more.
+      // Logs showed the first rebuild after a short trip fail as well (the
+      // new decoder's frames failing as in the background), a second one a
+      // moment later hold. A failure that mpv reports is caught as it comes
+      // ([_onHwDecodeFailed]); this looks once more in case none is.
       await Future<void>.delayed(const Duration(milliseconds: 1500));
-      if (!current() || _decoderNow(player) != 'no') return;
-      _bgTrace?.mark('硬件解码没有恢复（解码器 no），再重建一次');
-      try {
-        player.setProperty('hwdec', 'no');
-        await Future<void>.delayed(const Duration(milliseconds: 300));
-        if (!current()) return;
-        player.setProperty('hwdec', hw);
-      } catch (_) {
-        return;
-      }
-      await Future<void>.delayed(const Duration(milliseconds: 1500));
-      if (!current()) return;
-      _bgTrace?.mark('再次重建后，解码器 ${_decoderNow(player)}');
+      if (current()) _rebuildIfSoftware(player, '重建后仍是软件解码');
     }();
+  }
+
+  /// Set while [_reseedDecoder] changes hwdec and seeks: the decoder is the
+  /// software one on purpose then, and the old decoder's last failures are
+  /// not new ones.
+  bool _reseeding = false;
+
+  /// mpv said a hardware decode failed while the app was away: the decoder
+  /// is rebuilt on the return however short the trip ([_backFromAway]).
+  bool _hwFailedAway = false;
+
+  Timer? _hwFailWatch;
+
+  /// When [_rebuildIfSoftware] rebuilt the decoder lately, to stop at three
+  /// a minute: a video the hardware decoder truly cannot do would otherwise
+  /// be rebuilt on and on.
+  final _hwRebuilds = <DateTime>[];
+
+  /// iOS invalidates the hardware decoder's sessions (VideoToolbox, -12903
+  /// and -12909) of an app that is not active, and not only after a long
+  /// trip: logs showed it after a second away, after a pull of the control
+  /// center, and on the first frames decoded once back. mpv then goes on
+  /// with the software decoder, which starts at the next keyframe only, so
+  /// the picture stands still for seconds with the sound going on. Rather
+  /// than guess from how long the app was away, the failure mpv reports is
+  /// acted on: away, the decoder is rebuilt on the return; in the
+  /// foreground, at once, from the cache.
+  void _onHwDecodeFailed(Player player) {
+    if (_reseeding || !identical(_videoPlayerController, player)) return;
+    if (_backgroundSince != null ||
+        WidgetsBinding.instance.lifecycleState != AppLifecycleState.resumed) {
+      _hwFailedAway = true;
+      return;
+    }
+    if (_hwFailWatch?.isActive ?? false) return;
+    // mpv tries the hardware decoder on a few more frames, then its copy
+    // mode, then software: looked at once that has settled.
+    _hwFailWatch = Timer(const Duration(milliseconds: 500), () {
+      _rebuildIfSoftware(player, '前台播放中硬件解码失败');
+    });
+  }
+
+  /// Rebuilds the decoder ([_reseedDecoder]) if it is the software one where
+  /// the hardware one is wanted, and logs it.
+  void _rebuildIfSoftware(Player player, String why) {
+    if (_reseeding ||
+        !identical(_videoPlayerController, player) ||
+        _playerCount == 0) {
+      return;
+    }
+    final hw = hwdec;
+    if (onlyPlayAudio.value || hw == null || hw == 'no') return;
+    if (WidgetsBinding.instance.lifecycleState != AppLifecycleState.resumed) {
+      _hwFailedAway = true;
+      return;
+    }
+    // '' with the video track off: nothing to rebuild.
+    if (_decoderNow(player) != 'no') return;
+    var trace = _bgTrace;
+    if (trace == null || trace.done) {
+      // Not around a trip already logged: a log of its own.
+      trace = _bgTrace = _BackgroundTrace('解码器恢复')
+        ..mark('$why ${_videoState(player)}');
+      _sampleLater(player, const Duration(seconds: 1), '1 秒后');
+      _sampleLater(player, const Duration(seconds: 3), '3 秒后');
+      _reportBackgroundLater(const Duration(seconds: 4));
+    } else {
+      trace.mark('$why（解码器 no）');
+      // A trip under two seconds plans no report of its own; the earliest
+      // planned one goes, the later ones find it done.
+      _sampleLater(player, const Duration(seconds: 2), '重建后 2 秒');
+      _reportBackgroundLater(const Duration(seconds: 4));
+    }
+    final now = DateTime.now();
+    _hwRebuilds.removeWhere(
+      (at) => now.difference(at) > const Duration(minutes: 1),
+    );
+    if (_hwRebuilds.length >= 3) {
+      trace.mark('一分钟内已重建 3 次，不再重建，留在软件解码');
+      return;
+    }
+    _hwRebuilds.add(now);
+    _reseedDecoder(player);
   }
 
   static String _decoderNow(Player player) {
@@ -889,44 +979,44 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
   AppLifecycleListener? _resumeWatch;
 
   /// Frames decoded in the background fail (VideoToolbox -12903, within a
-  /// second of leaving) and mpv goes on with the software decoder. The
-  /// rebuild back in the foreground ([_reseedDecoder]) did not mend that
-  /// every time: logs showed the software decoder kept, and, paused, no
-  /// frame at all after it (playhead and frames decoded still, with the
-  /// cache ahead of the playhead). So no picture is decoded away while
-  /// playing there: the video track is turned off as 听视频 does, the sound
-  /// plays on, and on return turning it on has mpv build a whole new video
-  /// decoder and start it at the playhead.
+  /// fifth of a second of leaving) and mpv goes on with the software
+  /// decoder, decoding pictures no one sees. Playing there for long (the
+  /// sound listened to), the video track is turned off as 听视频 does, and
+  /// on return turning it on has mpv build a whole new video decoder.
   ///
-  /// Only when playing: a track turned on again starts from the network (the
-  /// cache drops a track turned off), and logs of trips taken paused showed
-  /// that wait, 3 to 4 s of still picture once played, where the rebuild
-  /// gets its picture from the cache. Paused, the app sleeps and decodes
-  /// nothing; this timer then runs only on the way back, too late to count.
-  void _videoOffInBackgroundSoon(Player player) {
+  /// Not at once: a track turned on again starts from the network (the
+  /// cache drops a track turned off), and logs of short trips with playback
+  /// going on showed that wait, 1.5 to 3 s of spinner with the sound
+  /// stopped too (mpv holds the sound for the picture to catch up). Back
+  /// within [_videoOffAfter], the decoder is rebuilt from the cache instead
+  /// ([_hwFailedAway]), as after a trip taken paused: picture in about half
+  /// a second. Paused, the app sleeps and decodes nothing; the timer then
+  /// runs only on the way back, and finds the trip over.
+  static const _videoOffAfter = Duration(seconds: 5);
+
+  void _videoOffInBackgroundSoon(Player player, String note) {
     final since = _backgroundSince;
-    // PiP said active a moment after the app goes.
-    Future<void>.delayed(const Duration(milliseconds: 500), () {
-      if (since == null || !identical(_backgroundSince, since)) return;
-      if (DateTime.now().difference(since) > const Duration(seconds: 2)) {
+    if (since == null) return;
+    Future<void>.delayed(_videoOffAfter, () {
+      if (!identical(_backgroundSince, since)) return;
+      // The app's own state too: a return the video page was not told of
+      // leaves [_backgroundSince] set.
+      if (WidgetsBinding.instance.lifecycleState ==
+          AppLifecycleState.resumed) {
         return;
       }
-      if (player.state.playing) _videoOff(player, '后台在播放，关掉视频轨（不解码画面）');
+      if (player.state.playing) _videoOff(player, note);
     });
   }
 
   /// Playback started in the background (from the lock screen, say), after
   /// [_videoOffInBackgroundSoon] looked.
   void _videoOffIfAway(Player player) {
-    final since = _backgroundSince;
-    // The app's own state too: a return the video page was not told of
-    // leaves [_backgroundSince] set.
-    if (since == null ||
-        WidgetsBinding.instance.lifecycleState == AppLifecycleState.resumed ||
-        DateTime.now().difference(since) < const Duration(milliseconds: 600)) {
+    if (_backgroundSince == null ||
+        WidgetsBinding.instance.lifecycleState == AppLifecycleState.resumed) {
       return;
     }
-    _videoOff(player, '在后台开始播放，关掉视频轨（不解码画面）');
+    _videoOffInBackgroundSoon(player, '在后台播放超过 5 秒，关掉视频轨（不解码画面）');
   }
 
   /// Not while the PiP window shows the picture.
@@ -991,12 +1081,7 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
   /// software one, the old rebuild.
   void _reseedIfSoftware(Player player) {
     Future<void>.delayed(const Duration(milliseconds: 1500), () {
-      if (!identical(_videoPlayerController, player) || _playerCount == 0) {
-        return;
-      }
-      if (_decoderNow(player) != 'no') return;
-      _bgTrace?.mark('新的视频解码器是软件解码，改用重建硬件解码器');
-      _reseedDecoder(player);
+      _rebuildIfSoftware(player, '新的视频解码器是软件解码，改用重建硬件解码器');
     });
   }
 
@@ -1927,6 +2012,13 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
             null,
           );
         } else {
+          // Per frame, after the hardware decoder was up: not a video it
+          // cannot do (that fails as the decoder is made).
+          if (Platform.isIOS &&
+              log.prefix == 'vd' &&
+              log.text.startsWith('Error while decoding frame (hardware')) {
+            _onHwDecodeFailed(player);
+          }
           final trace = _bgTrace;
           if (log.level == 'warn' &&
               trace != null &&
@@ -2543,6 +2635,8 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     } else if (Platform.isIOS) {
       _endResumeWatch();
       _videoOffFor = null;
+      _hwFailWatch?.cancel();
+      _hwFailedAway = false;
       IOSPipHelper.dispose();
     }
     _timer?.cancel();
