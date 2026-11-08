@@ -1411,7 +1411,7 @@ class RipperDownloader {
   ) async {
     final effectiveConcurrency = settings.concurrency;
     _semaphore.setLimit(effectiveConcurrency);
-    final candidateUrls = _unique(resolver.rangeCandidates());
+    final candidateUrls = _unique(resolver.startupRangeCandidates());
     final headLength = min(
       range.length,
       max(64 * 1024, settings.minChunkBytes),

@@ -13,6 +13,7 @@ import 'package:PiliPlus/utils/storage.dart';
 import 'package:PiliPlus/utils/storage_key.dart';
 import 'package:PiliPlus/utils/storage_pref.dart';
 import 'package:PiliPlus/utils/video_utils.dart';
+import 'package:PiliPlus/plugin/pl_player/models/ripper_region.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart' show FilteringTextInputFormatter;
 import 'package:flutter_smart_dialog/flutter_smart_dialog.dart';
@@ -75,14 +76,29 @@ List<SettingsModel> get videoSettings => [
     setKey: SettingBoxKey.threadRipperEpisodeEnabled,
     defaultVal: true,
   ),
-  const SwitchModel(
-    title: '线程撕裂者：海外节点',
-    subtitle:
-        '默认关闭（与原版一致）：用大陆节点，冷门视频也有，海外看靠多线程补速度；'
-        '开启后只用海外节点，热门视频快，冷门视频常没缓存。自定义节点为空时生效',
-    leading: Icon(Icons.public),
-    setKey: SettingBoxKey.threadRipperOverseas,
-    defaultVal: false,
+  NormalModel(
+    title: '线程撕裂者：节点地区',
+    leading: const Icon(Icons.public),
+    getSubtitle: () =>
+        '${Pref.threadRipperRegion.label}：${Pref.threadRipperRegion.description}。'
+        '自定义节点为空时生效，下次加载生效',
+    onTap: (context, setState) async {
+      final result = await showDialog<RipperRegion>(
+        context: context,
+        builder: (context) => SelectDialog<RipperRegion>(
+          title: '线程撕裂者：节点地区',
+          value: Pref.threadRipperRegion,
+          values: RipperRegion.values.map((e) => (e, e.label)).toList(),
+        ),
+      );
+      if (result != null) {
+        await GStorage.setting.put(
+          SettingBoxKey.threadRipperRegion,
+          result.index,
+        );
+        if (context.mounted) setState();
+      }
+    },
   ),
   NormalModel(
     title: '线程撕裂者：并发数',

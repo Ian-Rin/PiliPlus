@@ -27,6 +27,7 @@ import 'package:PiliPlus/plugin/pl_player/models/heart_beat_type.dart';
 import 'package:PiliPlus/plugin/pl_player/models/play_repeat.dart';
 import 'package:PiliPlus/plugin/pl_player/models/play_status.dart';
 import 'package:PiliPlus/plugin/pl_player/models/video_fit_type.dart';
+import 'package:PiliPlus/plugin/pl_player/models/ripper_region.dart';
 import 'package:PiliPlus/plugin/pl_player/utils/danmaku_options.dart';
 import 'package:PiliPlus/plugin/pl_player/utils/fullscreen.dart';
 import 'package:PiliPlus/services/service_locator.dart';
@@ -1393,12 +1394,18 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
         .whereType<String>()
         .toList();
     final hosts = custom.isNotEmpty
-        ? custom
-        : Pref.threadRipperOverseas
-        ? RipperCdnResolver.overseasHosts
-        : RipperCdnResolver.mainlandHosts;
+        ? custom.take(4)
+        : switch (Pref.threadRipperRegion) {
+            RipperRegion.overseas => RipperCdnResolver.overseasHosts.take(4),
+            RipperRegion.mainland => RipperCdnResolver.mainlandHosts.take(4),
+            // Raced at a start: two of each.
+            RipperRegion.auto => [
+              ...RipperCdnResolver.overseasHosts.take(2),
+              ...RipperCdnResolver.mainlandHosts.take(2),
+            ],
+          };
     final client = _ripperClient;
-    for (final host in hosts.take(4)) {
+    for (final host in hosts) {
       () async {
         try {
           final request = await client.headUrl(Uri.https(host, '/'));
@@ -1416,6 +1423,7 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     client: _ripperClient,
     concurrency: Pref.threadRipperConcurrency,
     overseas: Pref.threadRipperOverseas,
+    overseasStart: Pref.threadRipperRegion == RipperRegion.auto,
     customHosts: Pref.threadRipperCustomHosts,
     autoConcurrency: Pref.threadRipperAutoConcurrency
         ? _ripperAutoConcurrency

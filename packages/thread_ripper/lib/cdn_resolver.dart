@@ -114,11 +114,27 @@ class RipperCdnResolver {
     }.toList();
   }
 
+  /// The automatic mode's overseas nodes for [urls] (see [boost]): each
+  /// node of [overseasHosts] with the first ordinary address's path, and
+  /// the addresses handed out that are on one already.
+  static List<Uri> boostCandidates(Iterable<String> urls) {
+    final originals = urls.map(Uri.parse).where(supports).toList();
+    final ordinary = originals.where((u) => !isRelay(u)).toList();
+    final donors = ordinary.where((u) => !u.host.endsWith('.akamaized.net'));
+    final donor = donors.isEmpty ? ordinary.firstOrNull : donors.first;
+    return {
+      ...originals.where((u) => overseasHosts.contains(u.host)),
+      if (donor != null)
+        for (final host in overseasHosts) donor.replace(host: host, port: 443),
+    }.toList();
+  }
+
   RipperCdnResolver(
     this.urls, {
     RipperBanList? bans,
     this.overseas = true,
     this.custom = false,
+    this.boost = const [],
     List<Uri>? originals,
     DateTime Function()? now,
   }) : bans = bans ?? RipperBanList(),
@@ -132,6 +148,17 @@ class RipperCdnResolver {
 
   /// Custom nodes picked in the settings (upstream's "custom" mode).
   final bool custom;
+
+  /// The automatic mode (this fork's): nodes raced for a start only, the
+  /// head and the first window of a request, beside [urls]. Overseas nodes
+  /// answer first from abroad when they hold the file (a popular video),
+  /// and lose the race when they would fetch it from the mainland first (a
+  /// rare one); the rest of the video comes from [urls], the mainland's,
+  /// which hold everything.
+  final List<Uri> boost;
+
+  List<Uri> get _boostAvailable =>
+      boost.where((u) => bans.allows(u) && _available(u)).toList();
   final _health = <Uri, _Health>{};
   final _routes = <String, _Measurement>{};
   static String _route(Uri url) => '${url.authority}${url.path}';
@@ -215,11 +242,35 @@ class RipperCdnResolver {
 
   // The first request also races the addresses Bilibili handed out, except in
   // the custom mode, which keeps to the picked servers.
-  List<Uri> startupCandidates() =>
-      _unbanned({if (!custom) ...originals, ...urls}.toList())
-          .where(_available)
-          .take(8)
-          .toList();
+  List<Uri> startupCandidates() {
+    final base = _unbanned(
+      {
+        if (!custom) ...originals,
+        ...urls,
+      }.toList(),
+    ).where(_available).toList();
+    final extra = _boostAvailable;
+    if (extra.isEmpty) return base.take(8).toList();
+    // Taken three at a time by the downloader, the first raced at once and
+    // the others 120 and 300 ms later: an overseas node, a mainland one,
+    // an overseas one.
+    final mixed = <Uri>{};
+    for (var i = 0; i < max(base.length, extra.length); i++) {
+      if (i < extra.length) mixed.add(extra[i]);
+      if (i < base.length) mixed.add(base[i]);
+    }
+    return mixed.take(8).toList();
+  }
+
+  /// The nodes of a start's first window: [rangeCandidates], with [boost]'s
+  /// in front (the downloader gives the most pieces to the fastest
+  /// measured, and the head just measured them).
+  List<Uri> startupRangeCandidates() {
+    final base = rangeCandidates();
+    final extra = _boostAvailable;
+    if (extra.isEmpty) return base;
+    return {...extra, ...base}.toList();
+  }
 
   List<Uri> pieceCandidates(List<Uri> preferred, int index, int round) {
     final offset = preferred.isEmpty ? 0 : round % preferred.length;

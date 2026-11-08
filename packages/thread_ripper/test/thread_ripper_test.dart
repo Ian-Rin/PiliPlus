@@ -12,6 +12,65 @@ import 'package:thread_ripper/cdn_resolver.dart';
 import 'package:thread_ripper/range_proxy.dart';
 
 void main() {
+  group('automatic mode', () {
+    const handed =
+        'https://upos-sz-mirrorali.bilivideo.com/upgcxcode/1/2/3/v.m4s?e=x';
+    final mainland = RipperCdnResolver.candidates([handed], overseas: false);
+    final boost = RipperCdnResolver.boostCandidates([handed]);
+
+    test('the overseas nodes, with the address handed out', () {
+      expect(
+        boost.map((u) => u.host),
+        RipperCdnResolver.overseasHosts,
+      );
+      expect(boost.every((u) => u.path == '/upgcxcode/1/2/3/v.m4s'), isTrue);
+      expect(boost.every((u) => u.query == 'e=x'), isTrue);
+    });
+
+    test('a start races overseas and mainland nodes in turn', () {
+      final resolver = RipperCdnResolver(
+        mainland,
+        overseas: false,
+        boost: boost,
+        originals: [Uri.parse(handed)],
+      );
+      final race = resolver.startupCandidates().take(3).toList();
+      expect(race[0], boost[0]);
+      expect(race[1], Uri.parse(handed));
+      expect(race[2], boost[1]);
+      // The first window may use them; the rest of the video does not.
+      expect(resolver.startupRangeCandidates().take(4), boost);
+      final rest = resolver.rangeCandidates();
+      expect(rest.any(boost.contains), isFalse);
+    });
+
+    test('without it, nothing changes', () {
+      final plain = RipperCdnResolver(
+        mainland,
+        overseas: false,
+        originals: [Uri.parse(handed)],
+      );
+      final other = RipperCdnResolver(
+        mainland,
+        overseas: false,
+        originals: [Uri.parse(handed)],
+      );
+      expect(plain.startupCandidates(), other.startupCandidates());
+      expect(plain.startupRangeCandidates(), other.rangeCandidates());
+    });
+
+    test('an overseas node that keeps failing leaves the race', () {
+      final resolver = RipperCdnResolver(
+        mainland,
+        overseas: false,
+        boost: boost,
+        originals: [Uri.parse(handed)],
+      );
+      resolver.failure(boost[0]);
+      expect(resolver.startupCandidates(), isNot(contains(boost[0])));
+    });
+  });
+
   test('CDN synthesis preserves signed path/query and resets peer ports', () {
     final urls = RipperCdnResolver.candidates([
       'https://peer.szbdyd.com:4483/upgcxcode/video.m4s?sign=a%2Bb&x=1',

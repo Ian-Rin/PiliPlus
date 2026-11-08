@@ -42,6 +42,7 @@ import 'package:PiliPlus/utils/platform_utils.dart';
 import 'package:PiliPlus/utils/storage.dart';
 import 'package:PiliPlus/utils/storage_key.dart';
 import 'package:PiliPlus/utils/utils.dart';
+import 'package:PiliPlus/plugin/pl_player/models/ripper_region.dart';
 import 'package:crypto/crypto.dart';
 import 'package:flex_seed_scheme/flex_seed_scheme.dart' show FlexSchemeVariant;
 import 'package:flutter/foundation.dart';
@@ -291,10 +292,26 @@ abstract final class Pref {
     SettingBoxKey.threadRipperEpisodeEnabled,
     defaultValue: true,
   );
-  // Overseas nodes by default (most fork users are abroad; upstream defaults
-  // to mainland); automatic thread count as upstream.
+
+  /// Automatic by default (this fork's users watch from abroad): a start
+  /// races overseas nodes beside the mainland's. Before the choice of three
+  /// a switch said 海外 or not: 海外 is kept, the rest is automatic.
+  static RipperRegion get threadRipperRegion {
+    final saved = _setting.get(SettingBoxKey.threadRipperRegion);
+    if (saved is int && saved >= 0 && saved < RipperRegion.values.length) {
+      return RipperRegion.values[saved];
+    }
+    return _setting.get(
+              SettingBoxKey.threadRipperOverseas,
+              defaultValue: false,
+            ) ==
+            true
+        ? RipperRegion.overseas
+        : RipperRegion.auto;
+  }
+
   static bool get threadRipperOverseas =>
-      _setting.get(SettingBoxKey.threadRipperOverseas, defaultValue: false);
+      threadRipperRegion == RipperRegion.overseas;
   static bool get threadRipperAutoConcurrency => _setting.get(
     SettingBoxKey.threadRipperAutoConcurrency,
     defaultValue: true,

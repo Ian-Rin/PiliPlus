@@ -43,6 +43,7 @@ class BtrRangeProxy {
     required this.userAgent,
     this.referer = 'https://www.bilibili.com/',
     this.prefetchHeads = true,
+    this.overseasStart = false,
     RipperFetch? fetch,
     HttpClient? client,
   }) : _client = client ?? newClient(),
@@ -62,6 +63,11 @@ class BtrRangeProxy {
 
   final bool overseas;
   final List<String> customHosts;
+
+  /// The automatic mode: with mainland nodes ([overseas] false), a start
+  /// (the head and the first window of a request) races the overseas nodes
+  /// too (see RipperCdnResolver.boost). Not with custom nodes.
+  final bool overseasStart;
   final RipperAutoConcurrency? autoConcurrency;
   final String userAgent;
   final String referer;
@@ -266,6 +272,9 @@ class BtrRangeProxy {
         customHosts: customHosts,
       ),
       originals: originals,
+      boost: overseasStart && !overseas && !_custom
+          ? RipperCdnResolver.boostCandidates(urls)
+          : const [],
       isAudio: isAudio,
       warmBytes: warmBytes,
     );
@@ -275,6 +284,7 @@ class BtrRangeProxy {
   String registerCandidates(
     List<Uri> urls, {
     List<Uri>? originals,
+    List<Uri> boost = const [],
     bool isAudio = false,
     int warmBytes = 0,
   }) {
@@ -289,6 +299,7 @@ class BtrRangeProxy {
           bans: _bans,
           overseas: overseas,
           custom: _custom,
+          boost: boost,
           originals: originals,
         ),
       ),

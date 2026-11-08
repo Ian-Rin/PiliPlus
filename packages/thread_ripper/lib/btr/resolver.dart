@@ -15,6 +15,10 @@ abstract interface class RipperResolver {
 
   List<Uri> ordered([int pieceIndex = 0]);
   List<Uri> rangeCandidates();
+
+  /// The nodes of a start's first window ([rangeCandidates] unless the
+  /// resolver races more for a start).
+  List<Uri> startupRangeCandidates();
   List<Uri> rescueCandidates();
 
   /// The speed of a transfer cut off before its end.
@@ -49,6 +53,9 @@ class RipperCdnResolverAdapter implements RipperResolver {
 
   @override
   List<Uri> rangeCandidates() => cdn.rangeCandidates();
+
+  @override
+  List<Uri> startupRangeCandidates() => cdn.startupRangeCandidates();
 
   @override
   List<Uri> rescueCandidates() => cdn.rescueCandidates();

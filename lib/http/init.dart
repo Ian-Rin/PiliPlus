@@ -132,6 +132,13 @@ class Request {
     Connectivity().onConnectivityChanged.skip(1).listen(_onConnectivityChanged);
   }
 
+  /// How long an idle connection to Bilibili's API is kept. Fifteen
+  /// seconds had a video opened after a little browsing open its play
+  /// address request with a new TCP and TLS round (from abroad, a few
+  /// hundred milliseconds more before every start); its servers keep one
+  /// open about a minute.
+  static const _apiIdleTimeout = Duration(seconds: 60);
+
   static (IOHttpClientAdapter, ConnectionManager?) _createPool() {
     final bool enableSystemProxy;
     late final String systemProxyHost;
@@ -147,18 +154,18 @@ class Request {
     final http11Adapter = IOHttpClientAdapter(
       createHttpClient: enableSystemProxy
           ? () => HttpClient()
-              ..idleTimeout = const Duration(seconds: 15)
+              ..idleTimeout = _apiIdleTimeout
               ..autoUncompress = false
               ..findProxy = ((_) => 'PROXY $systemProxyHost:$systemProxyPort')
               ..badCertificateCallback = (cert, host, port) => true
           : () => HttpClient()
-              ..idleTimeout = const Duration(seconds: 15)
+              ..idleTimeout = _apiIdleTimeout
               ..autoUncompress = false, // Http2Adapter没有自动解压, 统一行为
     );
 
     final connectionManager = _enableHttp2
         ? ConnectionManager(
-            idleTimeout: const Duration(seconds: 15),
+            idleTimeout: _apiIdleTimeout,
             onClientCreate: enableSystemProxy
                 ? (_, config) => config
                     ..proxy = Uri(

@@ -80,6 +80,8 @@ class _LoggingResolver implements RipperResolver {
   @override
   List<Uri> rangeCandidates() => inner.rangeCandidates();
   @override
+  List<Uri> startupRangeCandidates() => inner.startupRangeCandidates();
+  @override
   List<Uri> rescueCandidates() => inner.rescueCandidates();
   @override
   void sample(Uri url, double bps) {

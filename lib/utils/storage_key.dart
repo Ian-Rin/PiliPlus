@@ -4,6 +4,7 @@ abstract final class SettingBoxKey {
   static const threadRipperEnabled = 'threadRipperEnabled';
   static const threadRipperEpisodeEnabled = 'threadRipperEpisodeEnabled';
   static const threadRipperOverseas = 'threadRipperOverseas';
+  static const threadRipperRegion = 'threadRipperRegion';
   static const threadRipperConcurrency = 'threadRipperConcurrency';
   static const threadRipperAutoConcurrency = 'threadRipperAutoConcurrency';
   static const threadRipperCustomHosts = 'threadRipperCustomHosts';
