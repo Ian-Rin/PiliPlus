@@ -19,6 +19,7 @@ import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:dio/dio.dart';
 import 'package:dio/io.dart';
 import 'package:dio_http2_adapter/dio_http2_adapter.dart';
+import 'package:PiliPlus/http/h2_connection_manager.dart';
 import 'package:flutter/foundation.dart' show kDebugMode, listEquals;
 
 class Request {
@@ -163,22 +164,25 @@ class Request {
               ..autoUncompress = false, // Http2Adapter没有自动解压, 统一行为
     );
 
-    final connectionManager = _enableHttp2
-        ? ConnectionManager(
+    final ConnectionManager? connectionManager = !_enableHttp2
+        ? null
+        // TCP_NODELAY on: without it, HTTP/2 took two round trips a request
+        // (see NoDelayConnectionManager). Through a proxy, the package's.
+        : !enableSystemProxy
+        ? NoDelayConnectionManager(
             idleTimeout: _apiIdleTimeout,
-            onClientCreate: enableSystemProxy
-                ? (_, config) => config
-                    ..proxy = Uri(
-                      scheme: 'http',
-                      host: systemProxyHost,
-                      port: systemProxyPort,
-                    )
-                    ..onBadCertificate = (_) => true
-                : Pref.badCertificateCallback
-                ? (_, config) => config.onBadCertificate = (_) => true
-                : null,
+            onBadCertificate: Pref.badCertificateCallback ? (_) => true : null,
           )
-        : null;
+        : ConnectionManager(
+            idleTimeout: _apiIdleTimeout,
+            onClientCreate: (_, config) => config
+              ..proxy = Uri(
+                scheme: 'http',
+                host: systemProxyHost,
+                port: systemProxyPort,
+              )
+              ..onBadCertificate = (_) => true,
+          );
     return (http11Adapter, connectionManager);
   }
 
