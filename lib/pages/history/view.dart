@@ -1,4 +1,7 @@
 import 'package:PiliPlus/common/widgets/appbar/appbar.dart';
+import 'package:PiliPlus/common/widgets/route_aware_mixin.dart'
+    show routeObserver;
+import 'package:PiliPlus/plugin/pl_player/controller.dart';
 import 'package:PiliPlus/common/widgets/flutter/pop_scope.dart';
 import 'package:PiliPlus/common/widgets/flutter/refresh_indicator.dart';
 import 'package:PiliPlus/common/widgets/gesture/horizontal_drag_gesture_recognizer.dart';
@@ -27,7 +30,7 @@ class HistoryPage extends StatefulWidget {
 }
 
 class _HistoryPageState extends State<HistoryPage>
-    with AutomaticKeepAliveClientMixin, GridMixin {
+    with AutomaticKeepAliveClientMixin, GridMixin, RouteAware {
   late final HistoryController _historyController;
 
   @override
@@ -37,6 +40,23 @@ class _HistoryPageState extends State<HistoryPage>
       HistoryController(widget.type),
       tag: widget.type ?? 'all',
     );
+    // The page itself, not its tabs (one route).
+    if (widget.type == null) {
+      routeObserver.subscribe(this, Get.routing.route as GetPageRoute);
+    }
+  }
+
+  /// Back from a video (or the search): the list as it is now, so that a
+  /// series opens at the episode watched last, not the one before it. Once
+  /// the progress the video page sent as it closed is in.
+  @override
+  Future<void> didPopNext() async {
+    if (_historyController.baseCtr.enableMultiSelect.value) return;
+    await PlPlayerController.heartBeatsSent();
+    if (!mounted || _historyController.baseCtr.enableMultiSelect.value) {
+      return;
+    }
+    currCtr().refreshQuietly().ignore();
   }
 
   HistoryController currCtr([int? index]) {
@@ -53,6 +73,7 @@ class _HistoryPageState extends State<HistoryPage>
 
   @override
   void dispose() {
+    if (widget.type == null) routeObserver.unsubscribe(this);
     Get.delete<HistoryBaseController>();
     super.dispose();
   }

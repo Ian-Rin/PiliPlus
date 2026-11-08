@@ -50,7 +50,9 @@ abstract class CommonListController<R, T> extends CommonController<R, T> {
       }
       page++;
     } else {
-      if (isRefresh && !handleError(res is Error ? res.errMsg : null)) {
+      if (isRefresh &&
+          !_quiet &&
+          !handleError(res is Error ? res.errMsg : null)) {
         loadingState.value = res as Error;
       }
     }
@@ -62,6 +64,19 @@ abstract class CommonListController<R, T> extends CommonController<R, T> {
     page = 1;
     isEnd = false;
     return super.onRefresh();
+  }
+
+  bool _quiet = false;
+
+  /// A refresh the user did not ask for (the page shown again): the list
+  /// is replaced in place, and a failure leaves it as it was.
+  Future<void> refreshQuietly() async {
+    _quiet = true;
+    try {
+      await onRefresh();
+    } finally {
+      _quiet = false;
+    }
   }
 
   @override

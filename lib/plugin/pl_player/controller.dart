@@ -2878,6 +2878,20 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
   void removeStatusLister(ValueChanged<PlayerStatus> listener) =>
       _statusListeners.remove(listener);
 
+  /// The last progress report sent; the one a video page sends as it closes
+  /// is still on its way when the page below shows again.
+  static Future<void>? _lastHeartBeat;
+
+  /// Once the last progress report is in (two seconds at most): a history
+  /// read before that still has the video's place from before.
+  static Future<void> heartBeatsSent() async {
+    final last = _lastHeartBeat;
+    if (last == null) return;
+    try {
+      await last.timeout(const Duration(seconds: 2));
+    } catch (_) {}
+  }
+
   // 记录播放记录
   Future<void>? makeHeartBeat(
     int progress, {
@@ -2899,7 +2913,7 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     }
 
     Future<void> send() {
-      return VideoHttp.heartBeat(
+      return _lastHeartBeat = VideoHttp.heartBeat(
         aid: aid ?? _aid,
         bvid: bvid ?? _bvid,
         cid: cid ?? this.cid,
