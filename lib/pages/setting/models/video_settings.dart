@@ -278,7 +278,7 @@ List<SettingsModel> get videoSettings => [
     title: '缓冲大小',
     leading: const Icon(Icons.storage_outlined),
     getSubtitle: () =>
-        '当前：${Pref.bufferSize}MB。点播视频的前向和后向缓冲区的最小值（此选项即mpv的--demuxer-max-bytes，--demuxer-max-back-bytes）；高码率视频会按码率自动放大：前向装下缓冲时长（最多48MB），后向装下30秒供往回拖（最多48MB）。直播流请设置下方的直播缓冲大小',
+        '当前：${Pref.bufferSize}MB。点播视频的前向和后向缓冲区的最小值（此选项即mpv的--demuxer-max-bytes，--demuxer-max-back-bytes）；高码率视频会按码率自动放大：前向装下缓冲时长（最多48MB），后向装下15秒供往回拖（最多48MB）。直播流请设置下方的直播缓冲大小',
     onTap: _showBufferSizeDialog,
   ),
   NormalModel(

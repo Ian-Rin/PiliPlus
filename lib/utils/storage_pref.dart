@@ -892,7 +892,7 @@ abstract final class Pref {
   /// Behind the playhead: a look back of ten seconds or so lands this far
   /// back and more (mpv starts at the keyframe before it, a GOP earlier).
   /// Logs of such looks back on 5874 (ten seconds kept) reloaded often.
-  static const _backSec = 30;
+  static const _backSec = 15;
 
   /// mpv stops filling at whichever of [bufferSec] and [bufferSize] comes
   /// first. The size, 4 MB by default, is 8 s of a 1080p video but 3 s of a

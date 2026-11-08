@@ -1,6 +1,6 @@
 import 'dart:async' show StreamSubscription, Timer;
 import 'dart:convert' show ascii, utf8;
-import 'dart:io' show HttpClient, Platform;
+import 'dart:io' show HttpClient, HttpHeaders, Platform;
 import 'dart:math' show max, min;
 import 'dart:ui' as ui;
 
@@ -69,6 +69,7 @@ import 'package:path/path.dart' as path;
 import 'package:screen_brightness_platform_interface/screen_brightness_platform_interface.dart';
 import 'package:thread_ripper/auto_concurrency.dart';
 import 'package:thread_ripper/btr/range_proxy.dart';
+import 'package:thread_ripper/cdn_resolver.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
 import 'package:window_manager/window_manager.dart';
 
@@ -1372,6 +1373,44 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
   /// round to each node. Logs showed a start's first bytes take a second or
   /// more to come from a distant CDN.
   static HttpClient _ripperClient = BtrRangeProxy.newClient();
+
+  static DateTime _warmedAt = DateTime(0);
+
+  /// Opens connections to the first CDN nodes while the play address is
+  /// still being fetched (a few hundred milliseconds away from Bilibili's
+  /// API), so that the proxy's first requests find them ready: the start
+  /// after a minute or more without a video otherwise opened each one, DNS,
+  /// TCP and TLS, before its first byte. A HEAD of each node's root, which
+  /// answers at once and keeps its connection.
+  static void warmCdn() {
+    if (!Pref.threadRipperEnabled) return;
+    final now = DateTime.now();
+    // Warm still (connections stay a minute), or in use.
+    if (now.difference(_warmedAt) < const Duration(seconds: 30)) return;
+    _warmedAt = now;
+    final custom = Pref.threadRipperCustomHosts
+        .map(RipperCdnResolver.normalizeHost)
+        .whereType<String>()
+        .toList();
+    final hosts = custom.isNotEmpty
+        ? custom
+        : Pref.threadRipperOverseas
+        ? RipperCdnResolver.overseasHosts
+        : RipperCdnResolver.mainlandHosts;
+    final client = _ripperClient;
+    for (final host in hosts.take(4)) {
+      () async {
+        try {
+          final request = await client.headUrl(Uri.https(host, '/'));
+          request.headers.set(HttpHeaders.userAgentHeader, BrowserUa.pc);
+          final response = await request.close().timeout(
+            const Duration(seconds: 6),
+          );
+          await response.drain<void>();
+        } catch (_) {}
+      }();
+    }
+  }
 
   BtrRangeProxy _newRipperProxy() => BtrRangeProxy(
     client: _ripperClient,
