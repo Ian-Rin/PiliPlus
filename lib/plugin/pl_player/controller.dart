@@ -1,6 +1,6 @@
 import 'dart:async' show StreamSubscription, Timer;
 import 'dart:convert' show ascii, utf8;
-import 'dart:io' show Platform;
+import 'dart:io' show HttpClient, Platform;
 import 'dart:math' show max, min;
 import 'dart:ui' as ui;
 
@@ -816,6 +816,12 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
       });
     }
     final away = DateTime.now().difference(since);
+    // Connections idle through a long trip may have died without a word (a
+    // NAT mapping gone): proxies made from now on start on fresh ones. The
+    // proxy playing keeps the client it has, which stays open.
+    if (away > const Duration(minutes: 1)) {
+      _ripperClient = BtrRangeProxy.newClient();
+    }
     if (player != null && _addressesExpired()) {
       // Nothing of the old file to mend: a fresh open, decoder and all.
       _videoOffFor = null;
@@ -1231,13 +1237,7 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
   /// Called as the page switches to another video.
   void hideStalePicture() {
     if (_videoPlayerController != null) stalePicture.value = true;
-    pictureReady.value = false;
   }
-
-  /// Whether this video's first frame is out. Until it is, the page shows
-  /// the video's cover: a black area for the seconds of a start (a switch to
-  /// a video not made ready ahead) felt broken.
-  final RxBool pictureReady = false.obs;
 
   // offline
   bool get isFileSource => dataSource is FileSource;
@@ -1278,7 +1278,6 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
       }
       // A new video is not the one that was in the background.
       _traceNextPlay = false;
-      pictureReady.value = false;
       _nearEndDone = false;
       // A start that never comes (loading forever) is logged too, with how
       // far it got.
@@ -1367,7 +1366,15 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
   // buffering ends.
   bool _ripperRestarting = false;
 
+  /// One client for every proxy (see [BtrRangeProxy.newClient]): back from a
+  /// video to the list and into the next, its requests go out on the
+  /// connections the last one opened, not after a new DNS, TCP and TLS
+  /// round to each node. Logs showed a start's first bytes take a second or
+  /// more to come from a distant CDN.
+  static HttpClient _ripperClient = BtrRangeProxy.newClient();
+
   BtrRangeProxy _newRipperProxy() => BtrRangeProxy(
+    client: _ripperClient,
     concurrency: Pref.threadRipperConcurrency,
     overseas: Pref.threadRipperOverseas,
     customHosts: Pref.threadRipperCustomHosts,
@@ -2294,7 +2301,6 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
       stream.videoParams.listen((VideoParams params) {
         _bgTrace?.mark('画面参数 ${params.dw}x${params.dh}');
         if (params.dw != null) {
-          pictureReady.value = true;
           _startup?.mark(
             '解码出第一帧 ${params.dw}x${params.dh}',
             once: 'frame',

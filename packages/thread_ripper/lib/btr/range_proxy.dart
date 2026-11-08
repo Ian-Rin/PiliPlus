@@ -44,7 +44,10 @@ class BtrRangeProxy {
     this.referer = 'https://www.bilibili.com/',
     this.prefetchHeads = true,
     RipperFetch? fetch,
-  }) : _settings = RipperDownloadSettings(
+    HttpClient? client,
+  }) : _client = client ?? newClient(),
+       _ownsClient = client == null,
+       _settings = RipperDownloadSettings(
          concurrency: concurrency,
          autoConcurrency: autoConcurrency != null,
        ) {
@@ -72,10 +75,26 @@ class BtrRangeProxy {
   /// The connection limit in force (the automatic count when it is on).
   int get concurrency => _downloader.concurrency;
 
-  final _client = HttpClient()
-    ..autoUncompress = false
-    // Upstream's first-byte timeout covers connecting as well.
-    ..connectionTimeout = const Duration(milliseconds: 5500);
+  /// A client for proxies to share ([BtrRangeProxy.new]'s `client`): the
+  /// CDN nodes are the same few for every video, and a proxy of its own per
+  /// video opened every connection anew, DNS, TCP and TLS, before the first
+  /// byte of each: a second or more to a distant CDN, at every start. Kept
+  /// alive between videos, the next start's requests go out at once.
+  static HttpClient newClient({Duration idleTimeout = _idleKeep}) =>
+      HttpClient()
+        ..autoUncompress = false
+        // Upstream's first-byte timeout covers connecting as well.
+        ..connectionTimeout = const Duration(milliseconds: 5500)
+        ..idleTimeout = idleTimeout;
+
+  /// A CDN keeps an idle connection for about a minute.
+  static const _idleKeep = Duration(seconds: 60);
+
+  final HttpClient _client;
+
+  /// A client given to the proxy is the caller's: closing the proxy aborts
+  /// its own requests only.
+  final bool _ownsClient;
 
   // One ban list for every track of the video, like upstream's options.cdnBans.
   final _bans = RipperBanList();
@@ -370,7 +389,7 @@ class BtrRangeProxy {
     _downloader.dispose();
     // Nothing is downloading for this player any more.
     autoConcurrency?.demand(0, concurrency, 0);
-    _client.close(force: true);
+    if (_ownsClient) _client.close(force: true);
     unawaited(_server?.close(force: true));
     _tracks.clear();
   }

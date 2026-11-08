@@ -881,9 +881,22 @@ class VideoDetailController extends GetxController
     if (result case Success(:final response) when response.dash != null) {
       final quality = response.missingVideoQualityBelowHighest;
       if (quality != -1) {
-        final more = await _getVideoUrl(quality, video: video);
-        if (more case Success(response: final extra)) {
-          response.dash!.video!.merge(extra.dash?.video);
+        final more = _getVideoUrl(quality, video: video).then((more) {
+          if (more case Success(response: final extra)) {
+            response.dash!.video!.merge(extra.dash?.video);
+          }
+        });
+        // The second request, one round trip more before every start, only
+        // adds qualities below the highest: waited for when the one wanted
+        // may be among them; otherwise it fills the quality menu meanwhile.
+        final videos = response.dash!.video!;
+        final want = plPlayerController.cacheVideoQa;
+        if (want == null ||
+            (want < videos.first.id &&
+                !videos.availableVideoQualities.contains(want))) {
+          await more;
+        } else {
+          more.ignore();
         }
       }
     }

@@ -317,6 +317,40 @@ void main() {
     expect(paths.length, count);
   });
 
+  // Proxies share a client, its connections kept between videos: closing
+  // one must still stop its own downloads, and leave the client working.
+  test('a shared client: close stops this proxy only', () async {
+    final shared = BtrRangeProxy.newClient();
+    addTearDown(() => shared.close(force: true));
+    proxy.close();
+    proxy = BtrRangeProxy(
+      concurrency: 4,
+      userAgent: 'test',
+      prefetchHeads: false,
+      client: shared,
+    );
+    await proxy.start();
+    final pending = fetch(register(['/slow'])).then<Object>(
+      (value) => value,
+      onError: (Object e) => e,
+    );
+    await Future<void>.delayed(const Duration(milliseconds: 100));
+    proxy.close();
+    await pending.timeout(const Duration(seconds: 1));
+    final count = paths.length;
+    await Future<void>.delayed(const Duration(milliseconds: 600));
+    expect(paths.length, count);
+
+    proxy = BtrRangeProxy(
+      concurrency: 4,
+      userAgent: 'test',
+      prefetchHeads: false,
+      client: shared,
+    );
+    await proxy.start();
+    expect((await fetch(register(['/good']))).$2, source);
+  });
+
   test(
     'unknown paths cannot turn the listener into an arbitrary URL proxy',
     () async {
