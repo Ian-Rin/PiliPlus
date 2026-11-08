@@ -35,21 +35,32 @@ class _RcmdPageState extends State<RcmdPage>
       clipBehavior: .hardEdge,
       margin: const .symmetric(horizontal: Style.safeSpace),
       decoration: const BoxDecoration(borderRadius: Style.mdRadius),
-      child: refreshIndicator(
-        key: controller.refreshKey,
-        onRefresh: controller.onRefresh,
-        child: CustomScrollView(
-          controller: controller.scrollController,
-          physics: const AlwaysScrollableScrollPhysics(),
-          slivers: [
-            SliverPadding(
-              padding: const .only(top: Style.cardSpace, bottom: 100),
-              sliver: Obx(
-                () => _buildBody(colorScheme, controller.loadingState.value),
-              ),
+      child: Stack(
+        children: [
+          refreshIndicator(
+            key: controller.refreshKey,
+            onRefresh: controller.onRefresh,
+            child: CustomScrollView(
+              controller: controller.scrollController,
+              physics: const AlwaysScrollableScrollPhysics(),
+              slivers: [
+                SliverPadding(
+                  padding: const .only(top: Style.cardSpace, bottom: 100),
+                  sliver: Obx(
+                    () =>
+                        _buildBody(colorScheme, controller.loadingState.value),
+                  ),
+                ),
+              ],
             ),
-          ],
-        ),
+          ),
+          Positioned(
+            top: 8,
+            left: 0,
+            right: 0,
+            child: Obx(() => _newPill(colorScheme, controller.newCount.value)),
+          ),
+        ],
       ),
     );
     if (PlatformUtils.isDesktop && Pref.showRefreshFAB) {
@@ -71,6 +82,44 @@ class _RcmdPageState extends State<RcmdPage>
       );
     }
     return child;
+  }
+
+  /// The new recommendations waiting above the saved list: put in only on
+  /// a tap here (or a pull to refresh).
+  Widget _newPill(ColorScheme colorScheme, int count) {
+    if (count == 0) return const SizedBox.shrink();
+    return Center(
+      child: Material(
+        color: colorScheme.primaryContainer,
+        elevation: 3,
+        shape: const StadiumBorder(),
+        child: InkWell(
+          customBorder: const StadiumBorder(),
+          onTap: controller.showNew,
+          child: Padding(
+            padding: const .symmetric(horizontal: 14, vertical: 7),
+            child: Row(
+              mainAxisSize: .min,
+              children: [
+                Icon(
+                  Icons.arrow_upward,
+                  size: 16,
+                  color: colorScheme.onPrimaryContainer,
+                ),
+                const SizedBox(width: 4),
+                Text(
+                  '$count 条新推荐',
+                  style: TextStyle(
+                    fontSize: 13,
+                    color: colorScheme.onPrimaryContainer,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
   }
 
   late final gridDelegate = SliverGridDelegateWithExtentAndRatio(

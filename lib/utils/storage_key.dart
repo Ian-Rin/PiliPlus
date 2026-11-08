@@ -269,6 +269,7 @@ abstract final class SettingBoxKey {
 
 abstract final class LocalCacheKey {
   static const String historyPause = 'historyPause',
+      rcmdSaved = 'rcmdSaved',
       blackMids = 'blackMids',
       danmakuFilterRules = 'danmakuFilterRules',
       mixinKey = 'mixinKey',

@@ -40,6 +40,7 @@ import 'package:PiliPlus/pages/common/publish/publish_route.dart';
 import 'package:PiliPlus/pages/search/widgets/search_text.dart';
 import 'package:PiliPlus/pages/sponsor_block/block_mixin.dart';
 import 'package:PiliPlus/pages/video/download_panel/view.dart';
+import 'package:PiliPlus/pages/video/play_url_prefetch.dart';
 import 'package:PiliPlus/pages/video/introduction/pgc/controller.dart';
 import 'package:PiliPlus/pages/video/introduction/ugc/controller.dart';
 import 'package:PiliPlus/pages/video/medialist/view.dart';
@@ -874,10 +875,16 @@ class VideoDetailController extends GetxController
   }
 
   /// The play addresses, with the qualities the first answer left out.
+  /// [first]: the first request, already on its way ([PlayUrlPrefetch]);
+  /// asked again when it failed.
   Future<LoadingState<PlayUrlModel>> _fetchPlayUrl({
     ({int cid, String bvid, int? epId})? video,
+    Future<LoadingState<PlayUrlModel>>? first,
   }) async {
-    final result = await _getVideoUrl(VideoQuality.hdrVivid.code, video: video);
+    final pressed = first == null ? null : await first;
+    final LoadingState<PlayUrlModel> result = pressed is Success<PlayUrlModel>
+        ? pressed
+        : await _getVideoUrl(VideoQuality.hdrVivid.code, video: video);
     if (result case Success(:final response) when response.dash != null) {
       final quality = response.missingVideoQualityBelowHighest;
       if (quality != -1) {
@@ -926,6 +933,23 @@ class VideoDetailController extends GetxController
     _next = null;
     if (DateTime.now().difference(next.at) > _nextFreshFor) return null;
     return next.result;
+  }
+
+  /// The address asked for as this video's card was pressed, when the
+  /// first request here asks for just what it asked for: a plain video.
+  Future<LoadingState<PlayUrlModel>>? _takePressed() {
+    if ((_actualVideoType ?? videoType) != VideoType.ugc ||
+        epId != null ||
+        seasonId != null ||
+        currLang.value != null) {
+      return null;
+    }
+    return PlayUrlPrefetch.take(
+      bvid: bvid,
+      cid: cid.value,
+      tryLook: plPlayerController.tryLook,
+      voiceBalance: plPlayerController.enableAudioNormalization,
+    );
   }
 
   /// Startup of the next video in a list (autoplay), done while this one
@@ -1027,7 +1051,9 @@ class VideoDetailController extends GetxController
       preferCodecs = isWiFi ? Pref.preferCodecs : Pref.preferCodecsCellular;
     }
 
-    final result = await (_takeNext() ?? _fetchPlayUrl());
+    final result =
+        await (_takeNext() ??
+            _fetchPlayUrl(first: fromReset ? null : _takePressed()));
 
     if (result case Success(:final response)) {
       data = response;

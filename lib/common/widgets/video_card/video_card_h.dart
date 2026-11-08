@@ -8,6 +8,7 @@ import 'package:PiliPlus/common/widgets/video_popup_menu.dart';
 import 'package:PiliPlus/http/search.dart';
 import 'package:PiliPlus/models/horizontal_video_model.dart';
 import 'package:PiliPlus/models_new/video/video_detail/dimension.dart';
+import 'package:PiliPlus/pages/video/play_url_prefetch.dart';
 import 'package:PiliPlus/utils/date_utils.dart';
 import 'package:PiliPlus/utils/duration_utils.dart';
 import 'package:PiliPlus/utils/page_utils.dart';
@@ -43,6 +44,17 @@ class VideoCardH extends StatelessWidget {
         clipBehavior: .none,
         children: [
           InkWell(
+            onTapDown: onTap == null
+                ? (_) {
+                    if (!(videoItem.isLive ?? false) &&
+                        (videoItem.redirectUrl?.isEmpty ?? true)) {
+                      PlayUrlPrefetch.start(
+                        bvid: videoItem.bvid,
+                        cid: videoItem.cid,
+                      );
+                    }
+                  }
+                : null,
             onLongPress: onLongPress,
             onSecondaryTap: PlatformUtils.isMobile ? null : onLongPress,
             onTap: onTap ?? () => pushVideoH(videoItem),

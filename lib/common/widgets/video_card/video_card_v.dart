@@ -8,6 +8,7 @@ import 'package:PiliPlus/http/search.dart';
 import 'package:PiliPlus/models/home/rcmd/result.dart';
 import 'package:PiliPlus/models/model_rec_video_item.dart';
 import 'package:PiliPlus/models_new/video/video_detail/dimension.dart';
+import 'package:PiliPlus/pages/video/play_url_prefetch.dart';
 import 'package:PiliPlus/utils/app_scheme.dart';
 import 'package:PiliPlus/utils/date_utils.dart';
 import 'package:PiliPlus/utils/duration_utils.dart';
@@ -91,6 +92,18 @@ class VideoCardV extends StatelessWidget {
       children: [
         Card(
           child: InkWell(
+            onTapDown: (_) {
+              if (videoItem.goto == 'av') {
+                PlayUrlPrefetch.start(
+                  bvid:
+                      videoItem.bvid ??
+                      (videoItem.aid == null
+                          ? null
+                          : IdUtils.av2bv(videoItem.aid!)),
+                  cid: videoItem.cid,
+                );
+              }
+            },
             onTap: onPushDetail,
             onLongPress: onLongPress,
             onSecondaryTap: PlatformUtils.isMobile ? null : onLongPress,

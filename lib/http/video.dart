@@ -55,10 +55,13 @@ abstract final class VideoHttp {
   // fresh_type 表示操作类型（0 初次 / 3 刷新 / 4 加载更多）、x_num 与 y_num
   // 为可视网格的行列数、pc_wx_install 等标记。参数取自该客户端自身渲染层的
   // 请求代码，不涉及私有接口与设备指纹。
+  /// [keepRaw]: the items kept (filtered), as they came, for the home
+  /// page's saved list (see [parseRcmdWeb]).
   static Future<LoadingState<List<RcmdVideoItemModel>>> rcmdVideoList({
     required int ps,
     required int freshIdx,
     bool desktop = false,
+    List<Object?>? keepRaw,
   }) async {
     final Map<String, Object> params;
     if (desktop) {
@@ -90,19 +93,29 @@ abstract final class VideoHttp {
       queryParameters: await WbiSign.makSign(params),
     );
     if (res.data['code'] == 0) {
-      List<RcmdVideoItemModel> list = <RcmdVideoItemModel>[];
-      for (final i in res.data['data']['item']) {
-        //过滤掉live与ad，以及拉黑用户
-        if (_filterWebRcmd(i)) continue;
-        final videoItem = RcmdVideoItemModel.fromJson(i);
-        if (!RecommendFilter.filterWithExempt(videoItem)) {
-          list.add(videoItem);
-        }
-      }
-      return Success(list);
+      return Success(parseRcmdWeb(res.data['data']['item'], keepRaw));
     } else {
       return Error(res.data['message']);
     }
+  }
+
+  /// The web (and desktop) recommendations' items, filtered: from the API,
+  /// or the home page's saved list (the filters as they are now).
+  static List<RcmdVideoItemModel> parseRcmdWeb(
+    Iterable<dynamic> items, [
+    List<Object?>? keepRaw,
+  ]) {
+    final list = <RcmdVideoItemModel>[];
+    for (final i in items) {
+      //过滤掉live与ad，以及拉黑用户
+      if (_filterWebRcmd(i)) continue;
+      final videoItem = RcmdVideoItemModel.fromJson(i);
+      if (!RecommendFilter.filterWithExempt(videoItem)) {
+        list.add(videoItem);
+        keepRaw?.add(i);
+      }
+    }
+    return list;
   }
 
   static bool _filterWebRcmd(dynamic i) {
@@ -136,6 +149,7 @@ abstract final class VideoHttp {
   // 添加额外的loginState变量模拟未登录状态
   static Future<LoadingState<List<RcmdVideoItemAppModel>>> rcmdVideoListApp({
     required int freshIdx,
+    List<Object?>? keepRaw,
   }) async {
     final params = {
       'build': 8430300,
@@ -186,19 +200,28 @@ abstract final class VideoHttp {
       ),
     );
     if (res.data['code'] == 0) {
-      final list = <RcmdVideoItemAppModel>[];
-      for (final i in res.data['data']['items']) {
-        // 屏蔽推广和拉黑用户
-        if (_filterAppRcmd(i)) continue;
-        final videoItem = RcmdVideoItemAppModel.fromJson(i);
-        if (!RecommendFilter.filterWithExempt(videoItem)) {
-          list.add(videoItem);
-        }
-      }
-      return Success(list);
+      return Success(parseRcmdApp(res.data['data']['items'], keepRaw));
     } else {
       return Error(res.data['message']);
     }
+  }
+
+  /// The app recommendations' items, filtered (see [parseRcmdWeb]).
+  static List<RcmdVideoItemAppModel> parseRcmdApp(
+    Iterable<dynamic> items, [
+    List<Object?>? keepRaw,
+  ]) {
+    final list = <RcmdVideoItemAppModel>[];
+    for (final i in items) {
+      // 屏蔽推广和拉黑用户
+      if (_filterAppRcmd(i)) continue;
+      final videoItem = RcmdVideoItemAppModel.fromJson(i);
+      if (!RecommendFilter.filterWithExempt(videoItem)) {
+        list.add(videoItem);
+        keepRaw?.add(i);
+      }
+    }
+    return list;
   }
 
   static bool _filterHotAndRank(dynamic i) {
