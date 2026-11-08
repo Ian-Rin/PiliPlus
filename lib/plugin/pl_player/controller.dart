@@ -769,6 +769,25 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     }
   }
 
+  /// The video's addresses are signed until a time they carry (`deadline=`,
+  /// Unix seconds). A log showed a return after two hours and a quarter
+  /// away: mpv went on reading, the proxy got nothing for it, the
+  /// connection broke off mid-packet (`Invalid NAL unit size`, `Packet
+  /// corrupt`) and only then was the video reopened with fresh ones. Past
+  /// that time (a minute before, to be safe), the return reopens at once.
+  bool _addressesExpired() {
+    if (isLive) return false;
+    final source = dataSource;
+    if (source is! NetworkSource) return false;
+    final value = Uri.tryParse(source.videoSource)?.queryParameters['deadline'];
+    final seconds = value == null ? null : int.tryParse(value);
+    if (seconds == null) return false;
+    final deadline = DateTime.fromMillisecondsSinceEpoch(seconds * 1000);
+    return DateTime.now().isAfter(
+      deadline.subtract(const Duration(minutes: 1)),
+    );
+  }
+
   /// A rebuild of the decoder waits for resumed: it decodes from the cache
   /// at once, and frames decoded before the app is up may fail as in the
   /// background.
@@ -798,6 +817,29 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
       });
     }
     final away = DateTime.now().difference(since);
+    if (player != null && _addressesExpired()) {
+      // Nothing of the old file to mend: a fresh open, decoder and all.
+      _videoOffFor = null;
+      _hwFailedAway = false;
+      final at = player.state.position;
+      trace?.mark(
+        '离开 ${away.inMinutes} 分钟，视频地址已过期，换新地址从 ${_seconds(at)} 重新打开',
+      );
+      if (trace != null && !trace.done) {
+        _reportBackgroundLater(const Duration(seconds: 6));
+      }
+      Timer.run(() {
+        if (!identical(_videoPlayerController, player) || _playerCount == 0) {
+          return;
+        }
+        if (onStreamBrokeOff case final reopen?) {
+          reopen(at);
+        } else {
+          refreshPlayer(at: at);
+        }
+      });
+      return;
+    }
     // Before the check of the time away: a track turned off is turned on
     // again after however short a trip.
     final videoBack = player != null && _videoBackOn(player);
@@ -1226,6 +1268,9 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
           if (trace.done || !identical(_startup, trace) || _playerCount == 0) {
             return;
           }
+          if (_videoPlayerController case final player?) {
+            trace.mark('15 秒 ${_videoState(player)} ${_stuckState(player)}');
+          }
           trace
             ..mark('15 秒内没有开始播放')
             ..done = true;
@@ -1404,7 +1449,6 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     return player;
   }
 
-  late final buffer = Pref.initBuffer(_playbackSpeed.value);
   late final liveBuffer = Pref.initLiveBuffer();
 
   // 配置播放器
@@ -1441,7 +1485,11 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
       else if (isLive)
         ...liveBuffer
       else
-        ...buffer,
+        // Per video: its bitrate sizes the cache.
+        ...Pref.initBuffer(
+          _playbackSpeed.value,
+          dataSource is NetworkSource ? dataSource.bitrate : null,
+        ),
       'video-rotate': ?rotate?.toString(),
       // mpv takes a connection that breaks off for the end of the stream: of
       // the file, or of one track (the picture stops while the audio plays
@@ -1534,6 +1582,10 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
           '${_ripperProxy != null ? '线程撕裂者' : '直连'}'
           '${seekTo != null && seekTo > Duration.zero ? '，从 ${seekTo.inSeconds} 秒开始' : ''}'
           '${audioSource?.isNotEmpty == true ? '' : '，无单独音轨'}'
+          '${switch (extras['demuxer-max-bytes']) {
+            final bytes? => '，缓冲 ${(int.parse(bytes) / 0x100000).toStringAsFixed(0)}MB',
+            null => '',
+          }}'
       ..mark('mpv 开始打开');
     _ripperRestarting = true;
     await player.open(
@@ -1602,6 +1654,9 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     }
     Future<void>.delayed(const Duration(seconds: 15), () {
       if (trace.done || !identical(_seekTrace, trace)) return;
+      if (identical(_videoPlayerController, player)) {
+        trace.mark('15 秒 ${_videoState(player)} ${_stuckState(player)}');
+      }
       trace.mark('15 秒内没有恢复');
       _endSeekTrace(trace, report: true);
     });
@@ -2186,9 +2241,57 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
 
     await _videoPlayerController?.play();
 
-    audioSessionHandler?.setActive(true);
+    _activateAudioSession();
 
     playerStatus = .playing;
+  }
+
+  /// The last activation of the audio session that failed, and when: a log
+  /// showed it refused (`Session activation failed`), and with no sound
+  /// going out mpv's clock may not move either. Shown in the logs of a start
+  /// or a seek that never moved ([_stuckState]).
+  String? _audioSessionFailure;
+
+  void _activateAudioSession() {
+    audioSessionHandler?.setActive(true).then(
+      (ok) {
+        if (ok) {
+          _audioSessionFailure = null;
+        } else {
+          _audioSessionFailure = '音频会话激活被拒绝 ${DateTime.now()}';
+        }
+      },
+      onError: (Object e, StackTrace s) {
+        _audioSessionFailure = '音频会话激活失败 ${DateTime.now()}：$e';
+        Utils.reportError(e, s);
+      },
+    );
+  }
+
+  /// What mpv says while the playhead stands still with nothing loading:
+  /// whether it waits on the cache, a seek, the sound (audio-pts, the audio
+  /// output) or thinks it has ended. Synchronous reads; only when a start or
+  /// a seek is given up on.
+  String _stuckState(Player player) {
+    String read(String name) {
+      try {
+        final value = player.getProperty(name);
+        return value.isEmpty ? '-' : value;
+      } catch (_) {
+        return '?';
+      }
+    }
+
+    return 'core-idle ${read('core-idle')} '
+        'paused-for-cache ${read('paused-for-cache')} '
+        'seeking ${read('seeking')} '
+        'pause ${read('pause')} '
+        'eof ${read('eof-reached')} '
+        'time-pos ${read('time-pos')} '
+        'audio-pts ${read('audio-pts')} '
+        'ao ${read('current-ao')} '
+        '缓存时长 ${read('demuxer-cache-duration')} '
+        '${_audioSessionFailure ?? '音频会话正常'}';
   }
 
   /// 暂停播放

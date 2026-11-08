@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'dart:math' show max, min;
 
 import 'package:PiliPlus/common/widgets/gesture/horizontal_drag_gesture_recognizer.dart'
     show deviceTouchSlop;
@@ -884,15 +885,37 @@ abstract final class Pref {
   static double get liveBufferSec =>
       _setting.get(SettingBoxKey.liveBufferSec, defaultValue: 0.0);
 
-  static Map<String, String> initBuffer([double playbackSpeed = 1.0]) {
+  /// Most the cache grows to for a high bitrate (see [initBuffer]).
+  static const _maxAutoBuffer = 48 * 0x100000;
+  static const _maxAutoBackBuffer = 24 * 0x100000;
+
+  /// mpv stops filling at whichever of [bufferSec] and [bufferSize] comes
+  /// first. The size, 4 MB by default, is 8 s of a 1080p video but 3 s of a
+  /// 4K one (10 Mbit/s): logs showed 3.5 s ahead at most on such videos,
+  /// a stall at every slow moment of the network, and seeks back of a few
+  /// seconds out of the cache already. With the [bitrate] (bits per second,
+  /// video and audio) the size is raised to hold [bufferSec] of it, a quarter
+  /// more for its peaks, up to 48 MB; behind the playhead half that, for
+  /// seeks back. [bufferSize] stays the least.
+  static Map<String, String> initBuffer([
+    double playbackSpeed = 1.0,
+    int? bitrate,
+  ]) {
     final bufSec = Pref.bufferSec * playbackSpeed;
-    final bufSiz = (Pref.bufferSize * 0x100000).toStringAsFixed(0);
+    final least = (Pref.bufferSize * 0x100000).round();
+    var ahead = least;
+    var behind = least;
+    if (bitrate != null && bitrate > 0) {
+      final need = (bitrate / 8 * bufSec * 1.25).round();
+      ahead = max(least, min(need, _maxAutoBuffer));
+      behind = max(least, min(need ~/ 2, _maxAutoBackBuffer));
+    }
     return {
       'cache': 'yes',
       'cache-secs': bufSec.toStringAsFixed(3),
       'demuxer-hysteresis-secs': (bufSec / 1.5).toStringAsFixed(3),
-      'demuxer-max-bytes': bufSiz,
-      'demuxer-max-back-bytes': bufSiz,
+      'demuxer-max-bytes': '$ahead',
+      'demuxer-max-back-bytes': '$behind',
     };
   }
 

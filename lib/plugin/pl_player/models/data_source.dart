@@ -14,9 +14,14 @@ sealed class DataSource {
 class NetworkSource extends DataSource {
   final List<String>? videoCandidates;
   final List<String>? audioCandidates;
+
+  /// Bits per second of the video and audio together, from the DASH
+  /// manifest: sizes the player's cache (see `Pref.initBuffer`).
+  final int? bitrate;
   NetworkSource({
     this.videoCandidates,
     this.audioCandidates,
+    this.bitrate,
     required super.videoSource,
     required super.audioSource,
   });

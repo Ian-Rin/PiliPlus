@@ -766,6 +766,14 @@ class VideoDetailController extends GetxController
     Duration? seek = defaultST ?? playedTime;
     if (seek == .zero) seek = null;
     seek ??= getFirstSegment();
+    final audioItem = data.dash?.audio
+        ?.where(
+          (item) =>
+              item.id == currentAudioQa?.code &&
+              audioUrl == VideoUtils.getCdnUrl(item.playUrls, isAudio: true),
+        )
+        .firstOrNull;
+    final videoBitrate = data.dash != null ? firstVideo.bandWidth : null;
     await plPlayerController.setDataSource(
       isFileSource
           ? FileSource(
@@ -783,16 +791,10 @@ class VideoDetailController extends GetxController
                       videoUrl == VideoUtils.getCdnUrl(firstVideo.playUrls)
                   ? firstVideo.playUrls.toList()
                   : null,
-              audioCandidates: data.dash?.audio
-                  ?.where(
-                    (item) =>
-                        item.id == currentAudioQa?.code &&
-                        audioUrl ==
-                            VideoUtils.getCdnUrl(item.playUrls, isAudio: true),
-                  )
-                  .firstOrNull
-                  ?.playUrls
-                  .toList(),
+              audioCandidates: audioItem?.playUrls.toList(),
+              bitrate: videoBitrate == null || videoBitrate <= 0
+                  ? null
+                  : videoBitrate + (audioItem?.bandWidth ?? 0),
             ),
       seekTo: seek,
       duration: data.timeLength == null
