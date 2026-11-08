@@ -119,16 +119,21 @@ class BtrRangeProxy {
   bool get _custom =>
       customHosts.any((host) => RipperCdnResolver.normalizeHost(host) != null);
 
-  Future<void> start() async {
+  /// [newSession] false for a proxy made ahead of its video (the next in a
+  /// list, while the one before still plays): [beginSession] once it is
+  /// played.
+  Future<void> start({bool newSession = true}) async {
     final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
     if (_closed) {
       await server.close(force: true);
       throw StateError('Download session closed');
     }
     // A new video is a new playback session.
-    autoConcurrency?.newSession();
+    if (newSession) beginSession();
     _listen(server);
   }
+
+  void beginSession() => autoConcurrency?.newSession();
 
   void _listen(HttpServer server) {
     _server = server;
@@ -223,7 +228,13 @@ class BtrRangeProxy {
   Future<void> debugDropListener() async => _server?.close(force: true);
 
   /// The loopback URL that serves the track whose addresses are [urls].
-  String register(Iterable<String> urls, {bool isAudio = false}) {
+  /// [warm]: its first window after the head downloads too, before mpv asks
+  /// (a video made ready ahead of time).
+  String register(
+    Iterable<String> urls, {
+    bool isAudio = false,
+    bool warm = false,
+  }) {
     final originals = urls
         .map(Uri.parse)
         .where(RipperCdnResolver.supports)
@@ -236,6 +247,7 @@ class BtrRangeProxy {
       ),
       originals: originals,
       isAudio: isAudio,
+      warm: warm,
     );
   }
 
@@ -244,6 +256,7 @@ class BtrRangeProxy {
     List<Uri> urls, {
     List<Uri>? originals,
     bool isAudio = false,
+    bool warm = false,
   }) {
     if (_closed || _server == null || urls.isEmpty) {
       throw StateError('No download session or media candidates');
@@ -261,7 +274,7 @@ class BtrRangeProxy {
       ),
       isAudio ? 'audio' : 'video',
     );
-    if (prefetchHeads) _prefetchHead(track);
+    if (prefetchHeads || warm) _prefetchHead(track, warm: warm);
     return 'http://127.0.0.1:$_port$id';
   }
 
@@ -270,7 +283,7 @@ class BtrRangeProxy {
   /// player asks for both init segments at once; fetching every head here as
   /// soon as the track is known does the same. A failure is forgotten: the
   /// request probes again, and answers 502 if that fails too.
-  void _prefetchHead(_Track track) {
+  void _prefetchHead(_Track track, {bool warm = false}) {
     final job = RipperAbortController();
     _jobs.add(job);
     track.headLoad = _probe(track, job.signal, fromStart: true)
@@ -278,8 +291,39 @@ class BtrRangeProxy {
           (bytes) {
             track.head = bytes;
             onTrace?.call('${track.kind} 开头已取到');
+            if (warm) _warmFirstWindow(track);
           },
           onError: (Object _) => onTrace?.call('${track.kind} 提前取开头失败'),
+        )
+        .whenComplete(() => _jobs.remove(job));
+  }
+
+  /// The window mpv's first request takes after the head (see [_serve]),
+  /// downloaded now and kept until then. Logs showed a start's head and
+  /// first window take two to five seconds between them on a distant CDN.
+  void _warmFirstWindow(_Track track) {
+    final total = track.total;
+    final head = track.head;
+    if (_closed || total == null || head == null || head.length >= total) {
+      return;
+    }
+    final job = RipperAbortController();
+    _jobs.add(job);
+    final from = head.length;
+    final window = track.warm = _window(
+      track,
+      RipperPiece(
+        0,
+        from,
+        min(total - 1, from + windowBytes(kind: track.kind, first: true) - 1),
+      ),
+      job.signal,
+      startup: true,
+    );
+    window._done
+        .then(
+          (_) => onTrace?.call('${track.kind} 第一个窗口已提前下好'),
+          onError: (Object _) {},
         )
         .whenComplete(() => _jobs.remove(job));
   }
@@ -383,7 +427,9 @@ class BtrRangeProxy {
     // app's zone as an unhandled error.
     result._done.then(
       (_) => result._markScheduled(),
-      onError: (Object _) => result._markScheduled(),
+      onError: (Object _) => result
+        ..failed = true
+        .._markScheduled(),
     );
     // A window that is not a start queues all of its pieces at once.
     if (!startup) result._markScheduled();
@@ -537,12 +583,23 @@ class BtrRangeProxy {
         _Window? ahead;
         if (cursor <= end) {
           final window = windowAt(cursor, first: true);
-          ahead = _window(
-            track,
-            window,
-            job.signal,
-            startup: !(track.warmEnd != 0 && window.start == track.warmEnd),
-          );
+          // Taken once: a later request starts where it asks.
+          final warm = track.warm;
+          track.warm = null;
+          if (warm != null &&
+              !warm.failed &&
+              warm.piece.start == window.start &&
+              warm.piece.end == window.end) {
+            onTrace?.call('${track.kind} 用提前下好的第一个窗口');
+            ahead = warm;
+          } else {
+            ahead = _window(
+              track,
+              window,
+              job.signal,
+              startup: !(track.warmEnd != 0 && window.start == track.warmEnd),
+            );
+          }
         }
         while (ahead != null) {
           final current = ahead;
@@ -686,6 +743,10 @@ class _Track {
   /// file, once [headLoad] has completed (null if that failed).
   Future<void>? headLoad;
   Uint8List? head;
+
+  /// The first window after [head], downloaded before mpv asked for it (see
+  /// [BtrRangeProxy._warmFirstWindow]); until its first request takes it.
+  _Window? warm;
 }
 
 /// One window's bytes on their way to mpv: kept in order until [attach],
@@ -695,6 +756,9 @@ class _Window {
 
   final RipperPiece piece;
   late final Future<void> _done;
+
+  /// Whether its download failed (known once it is over).
+  bool failed = false;
   final _scheduled = Completer<void>();
   final _kept = <Uint8List>[];
 

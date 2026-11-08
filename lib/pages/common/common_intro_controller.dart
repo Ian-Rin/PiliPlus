@@ -64,6 +64,10 @@ abstract class CommonIntroController extends GetxController
   bool prevPlay();
   bool nextPlay();
 
+  /// What [nextPlay] would switch to, without switching (or loading
+  /// anything): the next video made ready ahead. Null if none is known.
+  BaseEpisodeItem? peekNext() => null;
+
   void actionShareVideo(BuildContext context);
 
   void onChangeEpisode(BaseEpisodeItem episode);

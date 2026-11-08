@@ -50,6 +50,7 @@ import 'package:PiliPlus/pages/video/widgets/header_control.dart';
 import 'package:PiliPlus/plugin/pl_player/controller.dart';
 import 'package:PiliPlus/plugin/pl_player/models/data_source.dart';
 import 'package:PiliPlus/plugin/pl_player/models/heart_beat_type.dart';
+import 'package:PiliPlus/plugin/pl_player/models/play_repeat.dart';
 import 'package:PiliPlus/plugin/pl_player/models/play_status.dart';
 import 'package:PiliPlus/services/download/download_service.dart';
 import 'package:PiliPlus/utils/accounts.dart';
@@ -853,26 +854,123 @@ class VideoDetailController extends GetxController
     queryVideoUrl(fromReset: true);
   }
 
-  Future<LoadingState<PlayUrlModel>> _getVideoUrl(int quality) {
+  /// [video]: another video than this one (the next in a list, fetched
+  /// ahead, see [prepareNext]).
+  Future<LoadingState<PlayUrlModel>> _getVideoUrl(
+    int quality, {
+    ({int cid, String bvid, int? epId})? video,
+  }) {
     return VideoHttp.videoUrl(
-      cid: cid.value,
-      bvid: bvid,
+      cid: video?.cid ?? cid.value,
+      bvid: video?.bvid ?? bvid,
       qn: quality,
-      epid: epId,
+      epid: video == null ? epId : video.epId,
       seasonId: seasonId,
       tryLook: plPlayerController.tryLook,
       videoType: _actualVideoType ?? videoType,
-      language: currLang.value,
+      language: video == null ? currLang.value : null,
       voiceBalance: plPlayerController.enableAudioNormalization,
     );
   }
 
-  Future<void> _supplementVideoQualities() async {
-    final quality = data.missingVideoQualityBelowHighest;
-    if (quality == -1) return;
-    final result = await _getVideoUrl(quality);
-    if (result case Success(:final response)) {
-      data.dash!.video!.merge(response.dash?.video);
+  /// The play addresses, with the qualities the first answer left out.
+  Future<LoadingState<PlayUrlModel>> _fetchPlayUrl({
+    ({int cid, String bvid, int? epId})? video,
+  }) async {
+    final result = await _getVideoUrl(VideoQuality.hdrVivid.code, video: video);
+    if (result case Success(:final response) when response.dash != null) {
+      final quality = response.missingVideoQualityBelowHighest;
+      if (quality != -1) {
+        final more = await _getVideoUrl(quality, video: video);
+        if (more case Success(response: final extra)) {
+          response.dash!.video!.merge(extra.dash?.video);
+        }
+      }
+    }
+    return result;
+  }
+
+  /// The next video's addresses, fetched while this one ends ([prepareNext]).
+  ({
+    int cid,
+    int? epId,
+    DateTime at,
+    Future<LoadingState<PlayUrlModel>> result,
+  })?
+  _next;
+
+  /// Signed addresses last a couple of hours; a next video fetched long ago
+  /// (playback paused near the end) is fetched again.
+  static const _nextFreshFor = Duration(minutes: 10);
+
+  Future<LoadingState<PlayUrlModel>>? _takeNext() {
+    final next = _next;
+    if (next == null ||
+        next.cid != cid.value ||
+        (!isUgc && next.epId != epId)) {
+      return null;
+    }
+    _next = null;
+    if (DateTime.now().difference(next.at) > _nextFreshFor) return null;
+    return next.result;
+  }
+
+  /// Startup of the next video in a list (autoplay), done while this one
+  /// ends: logs of a list played through showed each switch spend a second
+  /// or two on the play address (two requests, one after the other) and
+  /// two to five on the proxy's first bytes from a distant CDN, with the
+  /// old picture up meanwhile. Called once this video has downloaded to its
+  /// end (or nearly ended): its addresses, then a proxy for its tracks with
+  /// their heads and first windows downloaded ([PlPlayerController.
+  /// prepareNextProxy]). A switch to it takes both.
+  Future<void> prepareNext(ugc.BaseEpisodeItem? episode) async {
+    if (isFileSource || episode == null) return;
+    switch (plPlayerController.playRepeat) {
+      case PlayRepeat.listOrder ||
+          PlayRepeat.listCycle ||
+          PlayRepeat.autoPlayRelated:
+        break;
+      default:
+        return;
+    }
+    final nextCid = episode.cid;
+    final nextBvid = episode.bvid ?? bvid;
+    final nextEpId = isUgc ? null : (episode.epId ?? episode.id);
+    if (nextCid == null || nextCid == cid.value) return;
+    if (_next case final next? when next.cid == nextCid) return;
+    final result = _fetchPlayUrl(
+      video: (cid: nextCid, bvid: nextBvid, epId: nextEpId),
+    );
+    _next = (cid: nextCid, epId: nextEpId, at: DateTime.now(), result: result);
+    final answer = await result;
+    if (isClosed || !identical(_next?.result, result)) return;
+    if (answer case Success(:final response)) {
+      final dash = response.dash;
+      final videos = dash?.video;
+      final cacheVideoQa = plPlayerController.cacheVideoQa;
+      if (videos == null || videos.isEmpty || cacheVideoQa == null) return;
+      if (videoType == VideoType.pgc &&
+          !(Pref.threadRipperEpisodeEnabled &&
+              !response.isDrm &&
+              !response.isPreview)) {
+        return;
+      }
+      // What [_queryVideoUrl] will pick.
+      final (_, _, _, video) = VideoUtils.findTargetVideo(
+        videos,
+        cacheVideoQa,
+        response.acceptQuality,
+        response.supportFormats!,
+        preferCodecs,
+      );
+      final audios = dash!.audio;
+      final audio = audios == null || audios.isEmpty
+          ? null
+          : VideoUtils.findTargetAudio(audios, plPlayerController.cacheAudioQa);
+      plPlayerController.prepareNextProxy(
+        video.playUrls.toList(),
+        audio?.playUrls.toList(),
+      );
     }
   }
 
@@ -917,11 +1015,10 @@ class VideoDetailController extends GetxController
       preferCodecs = isWiFi ? Pref.preferCodecs : Pref.preferCodecsCellular;
     }
 
-    final result = await _getVideoUrl(VideoQuality.hdrVivid.code);
+    final result = await (_takeNext() ?? _fetchPlayUrl());
 
     if (result case Success(:final response)) {
       data = response;
-      if (data.dash != null) await _supplementVideoQualities();
 
       languages.value = data.language?.items;
       currLang.value = data.curLanguage;

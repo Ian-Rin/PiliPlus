@@ -748,6 +748,72 @@ class UgcIntroController extends CommonIntroController with ReloadMixin {
     }
   }
 
+  /// [nextPlay]'s choice, step for step, without its side effects (more of
+  /// the play-all list loaded, related videos queried): kept in step with it.
+  @override
+  BaseEpisodeItem? peekNext({bool skipPart = false}) {
+    try {
+      final List<BaseEpisodeItem> episodes = <BaseEpisodeItem>[];
+      bool isPart = false;
+      final videoDetail = this.videoDetail.value;
+      if (!skipPart && videoDetail.hasParts) {
+        isPart = true;
+        episodes.addAll(videoDetail.pages!);
+      } else if (videoDetailCtr.isPlayAll) {
+        episodes.addAll(videoDetailCtr.mediaList);
+      } else if (videoDetail.ugcSeason != null) {
+        for (final section in videoDetail.ugcSeason!.sections!) {
+          episodes.addAll(section.episodes!);
+        }
+      }
+
+      final playRepeat = videoDetailCtr.plPlayerController.playRepeat;
+      final related =
+          playRepeat == PlayRepeat.autoPlayRelated &&
+          videoDetailCtr.plPlayerController.showRelatedVideo;
+      if (episodes.isEmpty) return related ? _firstRelated() : null;
+
+      final targetCid = skipPart ? seasonCid : cid.rawValue;
+      int nextIndex = episodes.indexWhere((e) => e.cid == targetCid) + 1;
+      if (nextIndex >= episodes.length) {
+        if (isPart &&
+            (videoDetailCtr.isPlayAll || videoDetail.ugcSeason != null)) {
+          return peekNext(skipPart: true);
+        }
+        if (playRepeat == PlayRepeat.listCycle) {
+          nextIndex = 0;
+        } else {
+          return related ? _firstRelated() : null;
+        }
+      }
+      while (episodes[nextIndex].cid == null) {
+        nextIndex++;
+        if (nextIndex >= episodes.length) return null;
+      }
+      final next = episodes[nextIndex];
+      return next.cid == cid.value ? null : next;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// [playRelated]'s choice, if the related videos are loaded already.
+  BaseEpisodeItem? _firstRelated() {
+    if (!Get.isRegistered<RelatedController>(tag: heroTag)) return null;
+    final relatedCtr = Get.find<RelatedController>(tag: heroTag);
+    if (relatedCtr.loadingState.value case Success(:final response)) {
+      final item = response?.firstOrNull;
+      if (item == null) return null;
+      return BaseEpisodeItem(
+        aid: item.aid,
+        bvid: item.bvid,
+        cid: item.cid,
+        cover: item.cover,
+      );
+    }
+    return null;
+  }
+
   bool playRelated() {
     RelatedController relatedCtr;
     if (Get.isRegistered<RelatedController>(tag: heroTag)) {

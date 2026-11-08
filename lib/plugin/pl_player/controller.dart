@@ -53,7 +53,7 @@ import 'package:PiliPlus/utils/utils.dart';
 import 'package:archive/archive.dart' show getCrc32;
 import 'package:canvas_danmaku/canvas_danmaku.dart';
 import 'package:easy_debounce/easy_throttle.dart';
-import 'package:flutter/foundation.dart' show kDebugMode;
+import 'package:flutter/foundation.dart' show kDebugMode, listEquals;
 import 'package:flutter/services.dart'
     show DeviceOrientation, HapticFeedback, KeyDownEvent;
 import 'package:flutter_smart_dialog/flutter_smart_dialog.dart';
@@ -807,8 +807,7 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
         trace?.mark(switch (revival) {
           ProxyRevival.alive => '加速代理正常',
           ProxyRevival.relistened => '加速代理的端口被系统收回，已在原端口重新监听',
-          ProxyRevival.failed =>
-            '加速代理恢复失败（之后断流会换新代理重新加载）：${proxy.reviveError}',
+          ProxyRevival.failed => '加速代理恢复失败（之后断流会换新代理重新加载）：${proxy.reviveError}',
         });
         // Worth a log entry however short the time away.
         if (revival != ProxyRevival.alive && trace != null && !trace.done) {
@@ -1043,8 +1042,7 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
       if (!identical(_backgroundSince, since)) return;
       // The app's own state too: a return the video page was not told of
       // leaves [_backgroundSince] set.
-      if (WidgetsBinding.instance.lifecycleState ==
-          AppLifecycleState.resumed) {
+      if (WidgetsBinding.instance.lifecycleState == AppLifecycleState.resumed) {
         return;
       }
       if (player.state.playing) _videoOff(player, note);
@@ -1274,6 +1272,7 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
       }
       // A new video is not the one that was in the background.
       _traceNextPlay = false;
+      _nearEndDone = false;
       // A start that never comes (loading forever) is logged too, with how
       // far it got.
       if (autoplay) {
@@ -1360,6 +1359,133 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
   // stall (upstream ignores waiting while video.seeking); cleared once
   // buffering ends.
   bool _ripperRestarting = false;
+
+  BtrRangeProxy _newRipperProxy() => BtrRangeProxy(
+    concurrency: Pref.threadRipperConcurrency,
+    overseas: Pref.threadRipperOverseas,
+    customHosts: Pref.threadRipperCustomHosts,
+    autoConcurrency: Pref.threadRipperAutoConcurrency
+        ? _ripperAutoConcurrency
+        : null,
+    userAgent: BrowserUa.pc,
+  );
+
+  /// A proxy for the next video in a list, made while this one ends (see
+  /// VideoDetailController.prepareNext): its tracks' heads and first windows
+  /// download ahead, and the switch to that video takes it.
+  ({
+    BtrRangeProxy proxy,
+    List<String> videoCandidates,
+    List<String>? audioCandidates,
+    String video,
+    String? audio,
+    DateTime at,
+  })?
+  _nextProxy;
+  int _nextProxyGeneration = 0;
+
+  /// Unused this long, it is let go: the addresses it holds are signed for a
+  /// limited time, and the play addresses it was made for are fetched again
+  /// after the same.
+  static const _nextProxyFreshFor = Duration(minutes: 10);
+
+  Future<void> prepareNextProxy(
+    List<String> videoCandidates,
+    List<String>? audioCandidates,
+  ) async {
+    if (isLive || !Pref.threadRipperEnabled || videoCandidates.isEmpty) return;
+    final audio = audioCandidates?.isNotEmpty == true ? audioCandidates : null;
+    if (_nextProxy case final next?
+        when listEquals(next.videoCandidates, videoCandidates) &&
+            listEquals(next.audioCandidates, audio)) {
+      return;
+    }
+    _dropNextProxy();
+    final generation = ++_nextProxyGeneration;
+    final proxy = _newRipperProxy();
+    try {
+      // Its session begins when it is played: this video's goes on.
+      await proxy.start(newSession: false);
+      if (generation != _nextProxyGeneration || _playerCount == 0) {
+        proxy.close();
+        return;
+      }
+      _nextProxy = (
+        proxy: proxy,
+        videoCandidates: videoCandidates,
+        audioCandidates: audio,
+        video: proxy.register(videoCandidates, warm: true),
+        audio: audio == null
+            ? null
+            : proxy.register(audio, isAudio: true, warm: true),
+        at: DateTime.now(),
+      );
+    } catch (_) {
+      proxy.close();
+    }
+  }
+
+  /// The proxy made ahead for [source], if it is the one. Another video (this
+  /// one reopened, another picked) leaves it be, unless it has gone stale.
+  ({
+    BtrRangeProxy proxy,
+    List<String> videoCandidates,
+    List<String>? audioCandidates,
+    String video,
+    String? audio,
+    DateTime at,
+  })?
+  _takeNextProxy(DataSource source) {
+    final next = _nextProxy;
+    if (next == null) return null;
+    if (DateTime.now().difference(next.at) > _nextProxyFreshFor) {
+      _dropNextProxy();
+      return null;
+    }
+    final audio =
+        source is NetworkSource && source.audioCandidates?.isNotEmpty == true
+        ? source.audioCandidates
+        : null;
+    if (isLive ||
+        !Pref.threadRipperEnabled ||
+        source is! NetworkSource ||
+        !listEquals(source.videoCandidates, next.videoCandidates) ||
+        !listEquals(audio, next.audioCandidates)) {
+      return null;
+    }
+    _nextProxy = null;
+    _nextProxyGeneration++;
+    return next;
+  }
+
+  void _dropNextProxy() {
+    _nextProxyGeneration++;
+    _nextProxy?.proxy.close();
+    _nextProxy = null;
+  }
+
+  /// Set by the video page: the next video in its list is made ready (see
+  /// VideoDetailController.prepareNext).
+  VoidCallback? onNearEnd;
+  bool _nearEndDone = false;
+
+  /// Once per video, when the rest of it has downloaded (its cache reaches
+  /// the end, so the next one's downloads take nothing from it) within a
+  /// minute of the end, or at 15 s from the end anyway.
+  void _checkNearEnd(Player player, Duration position) {
+    if (_nearEndDone || isLive || dataSource is! NetworkSource) return;
+    final callback = onNearEnd;
+    if (callback == null || position <= Duration.zero) return;
+    final state = player.state;
+    final duration = state.duration;
+    if (duration <= Duration.zero) return;
+    final left = duration - position;
+    if (left > const Duration(minutes: 1)) return;
+    final allHere = state.buffer >= duration - const Duration(seconds: 1);
+    if (!allHere && left > const Duration(seconds: 15)) return;
+    _nearEndDone = true;
+    callback();
+  }
 
   String? shadersDirPath;
   Future<String> get copyShadersToExternalDirectory async {
@@ -1535,19 +1661,38 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     _ripperProxy = null;
     String video = dataSource.videoSource;
     String? audioSource = dataSource.audioSource;
-    if (!isLive &&
+    final prepared = _takeNextProxy(dataSource);
+    if (prepared != null) {
+      // Made while the video before ended: its heads and first windows are
+      // here already. Its socket may have been taken back meanwhile.
+      _ripperProxy = prepared.proxy;
+      final revival = await prepared.proxy.revive();
+      if (generation != _ripperGeneration || _playerCount == 0) {
+        prepared.proxy.close();
+        return;
+      }
+      if (revival == ProxyRevival.failed) {
+        prepared.proxy.close();
+        _ripperProxy = null;
+      } else {
+        prepared.proxy.beginSession();
+        video = prepared.video;
+        if (prepared.audio case final audio?
+            when audioSource?.isNotEmpty == true) {
+          audioSource = audio;
+        }
+        _startup?.mark(
+          '用提前准备的加速代理（'
+          '${DateTime.now().difference(prepared.at).inSeconds} 秒前开始准备）',
+        );
+      }
+    }
+    if (_ripperProxy == null &&
+        !isLive &&
         dataSource is NetworkSource &&
         dataSource.videoCandidates?.isNotEmpty == true &&
         Pref.threadRipperEnabled) {
-      final proxy = BtrRangeProxy(
-        concurrency: Pref.threadRipperConcurrency,
-        overseas: Pref.threadRipperOverseas,
-        customHosts: Pref.threadRipperCustomHosts,
-        autoConcurrency: Pref.threadRipperAutoConcurrency
-            ? _ripperAutoConcurrency
-            : null,
-        userAgent: BrowserUa.pc,
-      );
+      final proxy = _newRipperProxy();
       _ripperProxy = proxy;
       try {
         await proxy.start();
@@ -2081,6 +2226,7 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
         if (_holdJumpToEnd(player, position)) return;
         if (position > Duration.zero) _lastGoodPosition = position;
         _traceStartup(position);
+        _checkNearEnd(player, position);
         _seekProgress(player);
         _ripperProxy?.autoConcurrency?.buffer(
           // Seconds of playback left, not of media: at 2x the buffer lasts
@@ -2347,19 +2493,21 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
   String? _audioSessionFailure;
 
   void _activateAudioSession() {
-    audioSessionHandler?.setActive(true).then(
-      (ok) {
-        if (ok) {
-          _audioSessionFailure = null;
-        } else {
-          _audioSessionFailure = '音频会话激活被拒绝 ${DateTime.now()}';
-        }
-      },
-      onError: (Object e, StackTrace s) {
-        _audioSessionFailure = '音频会话激活失败 ${DateTime.now()}：$e';
-        Utils.reportError(e, s);
-      },
-    );
+    audioSessionHandler
+        ?.setActive(true)
+        .then(
+          (ok) {
+            if (ok) {
+              _audioSessionFailure = null;
+            } else {
+              _audioSessionFailure = '音频会话激活被拒绝 ${DateTime.now()}';
+            }
+          },
+          onError: (Object e, StackTrace s) {
+            _audioSessionFailure = '音频会话激活失败 ${DateTime.now()}：$e';
+            Utils.reportError(e, s);
+          },
+        );
   }
 
   /// What mpv says while the playhead stands still with nothing loading:
@@ -2841,6 +2989,8 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     _stopOrientationListener();
     _disableAutoEnterPip();
     setPlayCallBack(null);
+    _dropNextProxy();
+    onNearEnd = null;
     dmState.clear();
     if (showSeekPreview) {
       _clearPreview();

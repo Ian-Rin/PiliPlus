@@ -87,7 +87,8 @@ class PgcIntroController extends CommonIntroController {
 
     super.onInit();
 
-    seasonIndex = pgcItem.seasons?.indexWhere((e) => e.seasonId == seasonId) ?? 0;
+    seasonIndex =
+        pgcItem.seasons?.indexWhere((e) => e.seasonId == seasonId) ?? 0;
     _updateEpisodeIndex(cid.value);
 
     _onGetPgcInfo();
@@ -408,6 +409,26 @@ class PgcIntroController extends CommonIntroController {
       return true;
     } catch (_) {
       return false;
+    }
+  }
+
+  /// [nextPlay]'s choice, without switching.
+  @override
+  BaseEpisodeItem? peekNext() {
+    try {
+      final episodes = this.episodes;
+      int nextIndex =
+          episodes.indexWhere((e) => e.cid == videoDetailCtr.cid.value) + 1;
+      if (nextIndex >= episodes.length) {
+        if (videoDetailCtr.plPlayerController.playRepeat !=
+            PlayRepeat.listCycle) {
+          return null;
+        }
+        nextIndex = 0;
+      }
+      return episodes[nextIndex];
+    } catch (_) {
+      return null;
     }
   }
 

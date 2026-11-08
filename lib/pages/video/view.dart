@@ -207,8 +207,15 @@ class _VideoDetailPageVState extends State<VideoDetailPageV>
       playOwner: (tag: heroTag, type: introController.runtimeType),
     );
     // The player is shared by the video pages: the one showing owns recovery.
-    videoDetailController.plPlayerController.onStreamBrokeOff =
-        _onStreamBrokeOff;
+    videoDetailController.plPlayerController
+      ..onStreamBrokeOff = _onStreamBrokeOff
+      ..onNearEnd = _onNearEnd;
+  }
+
+  /// The next video in the list made ready while this one ends.
+  void _onNearEnd() {
+    if (videoDetailController.isFileSource) return;
+    videoDetailController.prepareNext(introController.peekNext()).ignore();
   }
 
   Future<void>? _onStreamBrokeOff(Duration position) {
@@ -354,6 +361,7 @@ class _VideoDetailPageVState extends State<VideoDetailPageV>
     if (player.onStreamBrokeOff == _onStreamBrokeOff) {
       player.onStreamBrokeOff = null;
     }
+    if (player.onNearEnd == _onNearEnd) player.onNearEnd = null;
 
     Get.delete<HorizontalMemberPageController>(
       tag: videoDetailController.heroTag,

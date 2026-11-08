@@ -546,6 +546,27 @@ void main() {
     expect(requests.length, greaterThan(before));
   });
 
+  // The next video in a list is made ready while the one before ends: its
+  // head and first window download before mpv asks for either.
+  test('a warm track downloads its first window ahead', () async {
+    final notes = <String>[];
+    proxy.onTrace = notes.add;
+    final url = proxy.registerCandidates([endpoint('/good')], warm: true);
+    await Future<void>.delayed(const Duration(milliseconds: 500));
+    expect(requests.where((r) => r.$2 == 0).length, 1);
+    expect(requests.any((r) => r.$2 == 65536), isTrue);
+    expect(notes, contains('video 第一个窗口已提前下好'));
+    final before = requests.length;
+    final result = await fetch(url);
+    expect(result.$2, source);
+    expect(notes, contains('video 用提前下好的第一个窗口'));
+    // Head and first window cover the 1.1 MB file: nothing asked again.
+    expect(requests.length, before);
+    // A second request starts where it asks, not from the window taken.
+    final again = await fetch(url, range: 'bytes=70000-');
+    expect(again.$2, source.sublist(70000));
+  });
+
   // Waiting for a window to reach mpv before asking for the next left every
   // connection idle for a round trip: too slow for fast playback.
   test('the next window downloads while mpv takes the current one', () async {
