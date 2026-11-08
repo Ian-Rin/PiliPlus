@@ -58,7 +58,6 @@ abstract final class IOSPipHelper {
               milliseconds:
                   ctr.positionInMilliseconds + (call.arguments as int),
             ),
-            isSeek: false,
           );
         }
     }
