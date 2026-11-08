@@ -1633,6 +1633,19 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     if (autosync != '0') {
       opt['autosync'] = autosync;
     }
+    // mpv gives up the hardware decoder for good after 3 failed frames. A
+    // rebuild after the background (see [_reseedDecoder]) starts decoding
+    // at a keyframe whose first frames may refer to pictures before it
+    // (an open GOP): logs showed VideoToolbox failing just those (-12909,
+    // with ffmpeg's "Missing reference picture"), mpv going to software
+    // for good, three rebuilds in a row ending the same way, and a 4K
+    // video left to the software decoder (paused, no picture at all: it
+    // starts at the next keyframe). Thirty frames in a row (about a second)
+    // let those few pass; a decoder that truly fails (iOS invalidates it
+    // in the background) still gives way, a second later.
+    if (Platform.isIOS && hwdec != null && hwdec != 'no') {
+      opt['hwdec-software-fallback'] = '30';
+    }
 
     final player = await Player.create(
       configuration: PlayerConfiguration(
@@ -1819,6 +1832,7 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
 
     assert(!isLive || seekTo == null);
     _appMovesPlayhead(seekTo ?? Duration.zero);
+    _openingFile = true;
     _ripperProxy?.onTrace = _startup?.mark;
     _startup
       ?..label =
@@ -2041,6 +2055,31 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     _reportedPosition = to;
     _jumpToEnd = null;
     _lastGoodPosition = to;
+  }
+
+  /// Set as a file is opened, until it reports a position of its own.
+  bool _openingFile = false;
+
+  /// A position the file before reported after the next one was opened:
+  /// dropped. Each start of a list's next video (autoplay at the end) went
+  /// on for five seconds with a still progress bar and no heartbeat: the
+  /// playhead was set to the new start (0), then the old file's last
+  /// position (its end) came in, a jump to the end the app had not asked
+  /// for, and [_holdJumpToEnd] held every position for five seconds. A
+  /// file's own first position is near where it was opened at (ten seconds
+  /// at most are waited for it).
+  bool _staleFromFileBefore(Duration position) {
+    if (!_openingFile) return false;
+    if ((position - _appMovedTo).abs() <= const Duration(seconds: 3) ||
+        DateTime.now().difference(_appMovedAt) > const Duration(seconds: 10)) {
+      _openingFile = false;
+      return false;
+    }
+    _startup?.mark(
+      '丢掉上一个视频晚到的位置 ${_seconds(position)}',
+      once: 'stale',
+    );
+    return true;
   }
 
   /// Where playback last was. mpv's own position is 0 after a reopen that
@@ -2307,6 +2346,7 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
 
       /// position
       stream.position.listen((Duration position) {
+        if (_staleFromFileBefore(position)) return;
         if (_holdJumpToEnd(player, position)) return;
         if (position > Duration.zero) _lastGoodPosition = position;
         _traceStartup(position);
