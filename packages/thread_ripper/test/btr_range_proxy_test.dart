@@ -548,23 +548,54 @@ void main() {
 
   // The next video in a list is made ready while the one before ends: its
   // head and first window download before mpv asks for either.
-  test('a warm track downloads its first window ahead', () async {
+  test('a warm track downloads its first windows ahead', () async {
     final notes = <String>[];
     proxy.onTrace = notes.add;
-    final url = proxy.registerCandidates([endpoint('/good')], warm: true);
+    // The head and two windows: the first (1 MiB) cut short by the file.
+    final url = proxy.registerCandidates([
+      endpoint('/good'),
+    ], warmBytes: 2 * 1024 * 1024);
     await Future<void>.delayed(const Duration(milliseconds: 500));
     expect(requests.where((r) => r.$2 == 0).length, 1);
     expect(requests.any((r) => r.$2 == 65536), isTrue);
-    expect(notes, contains('video 第一个窗口已提前下好'));
+    expect(notes.any((n) => n.startsWith('video 提前下好')), isTrue);
     final before = requests.length;
     final result = await fetch(url);
     expect(result.$2, source);
-    expect(notes, contains('video 用提前下好的第一个窗口'));
+    expect(notes, contains('video 用提前下好的窗口'));
     // Head and first window cover the 1.1 MB file: nothing asked again.
     expect(requests.length, before);
-    // A second request starts where it asks, not from the window taken.
+    // A second request starts where it asks.
     final again = await fetch(url, range: 'bytes=70000-');
     expect(again.$2, source.sublist(70000));
+  });
+
+  test('the windows downloaded ahead are taken one after another', () async {
+    source = Uint8List.fromList(List.generate(4000000, (i) => (i * 13) % 251));
+    final notes = <String>[];
+    proxy.onTrace = notes.add;
+    // The first window (1 MiB) and the next (2 MiB).
+    final url = proxy.registerCandidates([
+      endpoint('/good'),
+    ], warmBytes: 3 * 1024 * 1024);
+    await Future<void>.delayed(const Duration(milliseconds: 800));
+    expect(notes, contains('video 提前下好 2 个窗口 3072 KiB'));
+    final before = requests.length;
+    final result = await fetch(url);
+    expect(result.$2, source);
+    // Only what lies past the windows downloaded ahead is asked for.
+    final after = requests.skip(before).toList();
+    expect(after, isNotEmpty);
+    expect(after.every((r) => r.$2 >= 65536 + 3 * 1024 * 1024), isTrue);
+  });
+
+  test('a request elsewhere leaves the windows downloaded ahead', () async {
+    final url = proxy.registerCandidates([
+      endpoint('/good'),
+    ], warmBytes: 64 * 1024);
+    await Future<void>.delayed(const Duration(milliseconds: 500));
+    final result = await fetch(url, range: 'bytes=900000-');
+    expect(result.$2, source.sublist(900000));
   });
 
   // Waiting for a window to reach mpv before asking for the next left every

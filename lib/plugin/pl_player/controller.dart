@@ -1231,7 +1231,13 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
   /// Called as the page switches to another video.
   void hideStalePicture() {
     if (_videoPlayerController != null) stalePicture.value = true;
+    pictureReady.value = false;
   }
+
+  /// Whether this video's first frame is out. Until it is, the page shows
+  /// the video's cover: a black area for the seconds of a start (a switch to
+  /// a video not made ready ahead) felt broken.
+  final RxBool pictureReady = false.obs;
 
   // offline
   bool get isFileSource => dataSource is FileSource;
@@ -1272,6 +1278,7 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
       }
       // A new video is not the one that was in the background.
       _traceNextPlay = false;
+      pictureReady.value = false;
       _nearEndDone = false;
       // A start that never comes (loading forever) is logged too, with how
       // far it got.
@@ -1389,10 +1396,15 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
   /// after the same.
   static const _nextProxyFreshFor = Duration(minutes: 10);
 
+  /// [videoBitrate] and [audioBitrate] (bits per second, from the next
+  /// video's manifest) size what is downloaded ahead: [_aheadSeconds] of
+  /// each track after its head.
   Future<void> prepareNextProxy(
     List<String> videoCandidates,
-    List<String>? audioCandidates,
-  ) async {
+    List<String>? audioCandidates, {
+    int? videoBitrate,
+    int? audioBitrate,
+  }) async {
     if (isLive || !Pref.threadRipperEnabled || videoCandidates.isEmpty) return;
     final audio = audioCandidates?.isNotEmpty == true ? audioCandidates : null;
     if (_nextProxy case final next?
@@ -1414,15 +1426,32 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
         proxy: proxy,
         videoCandidates: videoCandidates,
         audioCandidates: audio,
-        video: proxy.register(videoCandidates, warm: true),
+        video: proxy.register(
+          videoCandidates,
+          warmBytes: _aheadBytes(videoBitrate, 0x100000, 16 * 0x100000),
+        ),
         audio: audio == null
             ? null
-            : proxy.register(audio, isAudio: true, warm: true),
+            : proxy.register(
+                audio,
+                isAudio: true,
+                warmBytes: _aheadBytes(audioBitrate, 128 * 1024, 0x100000),
+              ),
         at: DateTime.now(),
       );
     } catch (_) {
       proxy.close();
     }
+  }
+
+  /// A start from the first window alone (1 MiB, a second or two of 1080p)
+  /// waited half a second a moment later, for the next window: ten seconds
+  /// are downloaded ahead, a quarter more for the bitrate's peaks.
+  static const _aheadSeconds = 10;
+
+  static int _aheadBytes(int? bitrate, int least, int most) {
+    if (bitrate == null || bitrate <= 0) return least;
+    return (bitrate / 8 * _aheadSeconds * 1.25).round().clamp(least, most);
   }
 
   /// The proxy made ahead for [source], if it is the one. Another video (this
@@ -1469,9 +1498,11 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
   VoidCallback? onNearEnd;
   bool _nearEndDone = false;
 
-  /// Once per video, when the rest of it has downloaded (its cache reaches
-  /// the end, so the next one's downloads take nothing from it) within a
-  /// minute of the end, or at 15 s from the end anyway.
+  /// Once per video, within three minutes of the end (a series' ending song
+  /// is skipped with 下一集 well before the end) while this video's cache
+  /// is in good shape (ten seconds ahead, or all of the rest), so that the
+  /// next one's downloads take nothing it needs; at 20 s from the end
+  /// anyway.
   void _checkNearEnd(Player player, Duration position) {
     if (_nearEndDone || isLive || dataSource is! NetworkSource) return;
     final callback = onNearEnd;
@@ -1480,9 +1511,12 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     final duration = state.duration;
     if (duration <= Duration.zero) return;
     final left = duration - position;
-    if (left > const Duration(minutes: 1)) return;
-    final allHere = state.buffer >= duration - const Duration(seconds: 1);
-    if (!allHere && left > const Duration(seconds: 15)) return;
+    if (left > const Duration(minutes: 3)) return;
+    final ahead = state.buffer - position;
+    final healthy =
+        ahead >= const Duration(seconds: 10) ||
+        state.buffer >= duration - const Duration(seconds: 1);
+    if (!healthy && left > const Duration(seconds: 20)) return;
     _nearEndDone = true;
     callback();
   }
@@ -2260,6 +2294,7 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
       stream.videoParams.listen((VideoParams params) {
         _bgTrace?.mark('画面参数 ${params.dw}x${params.dh}');
         if (params.dw != null) {
+          pictureReady.value = true;
           _startup?.mark(
             '解码出第一帧 ${params.dw}x${params.dh}',
             once: 'frame',
@@ -2285,6 +2320,7 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
             player.state.playing &&
             player.state.position > Duration.zero) {
           _ripperProxy?.autoConcurrency?.stall();
+          _traceFastStall(player);
         }
         if (!buffering) _ripperRestarting = false;
         isBuffering.value = buffering;
@@ -2449,12 +2485,71 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
   }
 
   /// 设置倍速
+  /// The cache was sized for the speed the video was opened at: at a long
+  /// press's 2x its seconds of media last half as long, and the download
+  /// has to bring twice as much. Held long, playback caught up with the
+  /// download and went frame by frame: mpv plays on once a second of media
+  /// is back (cache-pause-wait), half a second at 2x, then waits again.
+  /// The cache now holds the same playing time at the speed in force, and
+  /// a wait gathers more before playback goes on: fewer, longer pauses.
+  void _cacheForSpeed(double speed) {
+    final player = _videoPlayerController;
+    final source = dataSource;
+    if (player == null || isLive || source is FileSource) return;
+    final options = {
+      ...Pref.initBuffer(
+        speed,
+        source is NetworkSource ? source.bitrate : null,
+      ),
+      'cache-pause-wait': (speed > 1 ? (2 * speed).clamp(1.0, 6.0) : 1.0)
+          .toStringAsFixed(1),
+    }..remove('cache');
+    for (final MapEntry(:key, :value) in options.entries) {
+      try {
+        player.setProperty(key, value);
+      } catch (_) {}
+    }
+  }
+
+  DateTime _lastFastStall = DateTime(0);
+
+  /// A wait for data above normal speed, logged (once a minute at most) with
+  /// what tells the network from the decoder: the cache left, the frames
+  /// dropped, the proxy's connections.
+  void _traceFastStall(Player player) {
+    final rate = player.state.rate;
+    if (rate <= 1.1 || isLive) return;
+    final now = DateTime.now();
+    if (now.difference(_lastFastStall) < const Duration(minutes: 1)) return;
+    _lastFastStall = now;
+    String read(String name) {
+      try {
+        final value = player.getProperty(name);
+        return value.isEmpty ? '-' : value;
+      } catch (_) {
+        return '?';
+      }
+    }
+
+    Utils.reportError(
+      '[倍速卡顿] ${rate}x '
+      '${longPressStatus.value ? '长按 ' : ''}'
+      '${_ripperProxy == null ? '直连' : '线程撕裂者 ${_ripperProxy!.concurrency} 线程'} '
+      '缓存 ${read('demuxer-cache-duration')}s '
+      'cache-secs ${read('cache-secs')} '
+      '上限 ${read('demuxer-max-bytes')} '
+      '下载速度 ${read('cache-speed')}B/s '
+      '${_videoState(player)}',
+    );
+  }
+
   Future<void> setPlaybackSpeed(double speed) async {
     lastPlaybackSpeed = playbackSpeed;
 
     if (speed == _videoPlayerController?.state.rate) return;
 
     await _videoPlayerController?.setRate(speed);
+    _cacheForSpeed(speed);
     if (!isLive) _playbackSpeed.value = speed;
     _updatePlaybackState();
     if (danmakuController != null) {

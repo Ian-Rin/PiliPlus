@@ -887,7 +887,12 @@ abstract final class Pref {
 
   /// Most the cache grows to for a high bitrate (see [initBuffer]).
   static const _maxAutoBuffer = 48 * 0x100000;
-  static const _maxAutoBackBuffer = 24 * 0x100000;
+  static const _maxAutoBackBuffer = 48 * 0x100000;
+
+  /// Behind the playhead: a look back of ten seconds or so lands this far
+  /// back and more (mpv starts at the keyframe before it, a GOP earlier).
+  /// Logs of such looks back on 5874 (ten seconds kept) reloaded often.
+  static const _backSec = 30;
 
   /// mpv stops filling at whichever of [bufferSec] and [bufferSize] comes
   /// first. The size, 4 MB by default, is 8 s of a 1080p video but 3 s of a
@@ -895,8 +900,8 @@ abstract final class Pref {
   /// a stall at every slow moment of the network, and seeks back of a few
   /// seconds out of the cache already. With the [bitrate] (bits per second,
   /// video and audio) the size is raised to hold [bufferSec] of it, a quarter
-  /// more for its peaks, up to 48 MB; behind the playhead half that, for
-  /// seeks back. [bufferSize] stays the least.
+  /// more for its peaks, up to 48 MB; behind the playhead [_backSec] of it,
+  /// up to 48 MB, for seeks back. [bufferSize] stays the least.
   static Map<String, String> initBuffer([
     double playbackSpeed = 1.0,
     int? bitrate,
@@ -908,7 +913,8 @@ abstract final class Pref {
     if (bitrate != null && bitrate > 0) {
       final need = (bitrate / 8 * bufSec * 1.25).round();
       ahead = max(least, min(need, _maxAutoBuffer));
-      behind = max(least, min(need ~/ 2, _maxAutoBackBuffer));
+      final back = (bitrate / 8 * _backSec * 1.25).round();
+      behind = max(least, min(back, _maxAutoBackBuffer));
     }
     return {
       'cache': 'yes',

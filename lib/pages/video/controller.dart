@@ -925,14 +925,9 @@ class VideoDetailController extends GetxController
   /// prepareNextProxy]). A switch to it takes both.
   Future<void> prepareNext(ugc.BaseEpisodeItem? episode) async {
     if (isFileSource || episode == null) return;
-    switch (plPlayerController.playRepeat) {
-      case PlayRepeat.listOrder ||
-          PlayRepeat.listCycle ||
-          PlayRepeat.autoPlayRelated:
-        break;
-      default:
-        return;
-    }
+    // Paused at the end, 下一集 is still pressed (an ending song skipped);
+    // one video on repeat has no next.
+    if (plPlayerController.playRepeat == PlayRepeat.singleCycle) return;
     final nextCid = episode.cid;
     final nextBvid = episode.bvid ?? bvid;
     final nextEpId = isUgc ? null : (episode.epId ?? episode.id);
@@ -970,6 +965,8 @@ class VideoDetailController extends GetxController
       plPlayerController.prepareNextProxy(
         video.playUrls.toList(),
         audio?.playUrls.toList(),
+        videoBitrate: video.bandWidth,
+        audioBitrate: audio?.bandWidth,
       );
     }
   }

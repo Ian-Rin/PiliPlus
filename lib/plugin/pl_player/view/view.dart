@@ -10,6 +10,7 @@ import 'package:PiliPlus/common/widgets/cropped_image.dart';
 import 'package:PiliPlus/common/widgets/custom_icon.dart';
 import 'package:PiliPlus/common/widgets/disabled_icon.dart';
 import 'package:PiliPlus/common/widgets/gesture/immediate_tap_gesture_recognizer.dart';
+import 'package:PiliPlus/common/widgets/image/network_img_layer.dart';
 import 'package:PiliPlus/common/widgets/gesture/mouse_interactive_viewer.dart';
 import 'package:PiliPlus/common/widgets/gesture/player_gesture_recognizer.dart';
 import 'package:PiliPlus/common/widgets/loading_widget.dart';
@@ -2028,9 +2029,24 @@ class _PLVideoPlayerState extends State<PLVideoPlayer>
             key: _videoKey,
             child: Obx(
               () {
-                // The video before's last frame, while the next is fetched.
-                if (plPlayerController.stalePicture.value) {
-                  return const SizedBox.expand();
+                // The video before's last frame, while the next is fetched,
+                // or nothing yet: the cover of the video coming.
+                if (plPlayerController.stalePicture.value ||
+                    !plPlayerController.pictureReady.value) {
+                  final cover = widget.videoDetailController?.cover.value;
+                  if (cover == null || cover.isEmpty) {
+                    return const SizedBox.expand();
+                  }
+                  return NetworkImgLayer(
+                    type: .emote,
+                    quality: 60,
+                    src: cover,
+                    width: widget.maxWidth,
+                    height: widget.maxHeight,
+                    fit: .contain,
+                    cacheWidth: true,
+                    getPlaceHolder: () => const SizedBox.expand(),
+                  );
                 }
                 final videoFit = plPlayerController.videoFit.value;
                 return Transform.flip(
