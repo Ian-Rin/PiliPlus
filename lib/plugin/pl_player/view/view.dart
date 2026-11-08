@@ -2028,6 +2028,10 @@ class _PLVideoPlayerState extends State<PLVideoPlayer>
             key: _videoKey,
             child: Obx(
               () {
+                // The video before's last frame, while the next is fetched.
+                if (plPlayerController.stalePicture.value) {
+                  return const SizedBox.expand();
+                }
                 final videoFit = plPlayerController.videoFit.value;
                 return Transform.flip(
                   flipX: plPlayerController.flipX.value,

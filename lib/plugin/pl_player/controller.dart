@@ -1222,6 +1222,19 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
   bool _processing = false;
   bool get processing => _processing;
 
+  /// The video's texture keeps the last frame it was given. On a switch to
+  /// another video (the next in a list, another part) the page shows the new
+  /// title at once, while the old picture stayed up until mpv was handed the
+  /// new file: after the play address was fetched and the thread-ripper
+  /// proxy had started. Hidden from the switch on; [Player.open] hides it
+  /// itself from then (its size goes to 0 until the new file's first frame).
+  final RxBool stalePicture = false.obs;
+
+  /// Called as the page switches to another video.
+  void hideStalePicture() {
+    if (_videoPlayerController != null) stalePicture.value = true;
+  }
+
   // offline
   bool get isFileSource => dataSource is FileSource;
 
@@ -1336,6 +1349,7 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
       }
     } finally {
       _processing = false;
+      stalePicture.value = false;
     }
   }
 
@@ -1587,6 +1601,7 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
             null => '',
           }}'
       ..mark('mpv 开始打开');
+    _freshVideoOptions(player);
     _ripperRestarting = true;
     await player.open(
       Media(
@@ -1596,6 +1611,55 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
       ),
       play: false,
     );
+    // The old picture is hidden by the player from here on.
+    stalePicture.value = false;
+  }
+
+  /// The player is kept from one video to the next, and so is what was set
+  /// on it for the one before. A log showed the switch to the next video in
+  /// a list with no picture at all (data there, no frame in 15 s), the video
+  /// before black as well when switched back to, until the page was left,
+  /// which makes a new player.
+  /// - [_videoOffFor] names the player, not the file: a track turned off in
+  ///   the background for one video kept [_videoOff] from turning it off
+  ///   for the next (decoded and drawn in the background then), and the
+  ///   return from turning it on.
+  /// - mpv keeps a track selection (`options/vid`) and the decoder
+  ///   (`options/hwdec`) across files; anything that left them off is put
+  ///   right and logged, to see which it was.
+  void _freshVideoOptions(Player player) {
+    final videoWasOff = identical(_videoOffFor, player);
+    _videoOffFor = null;
+    String read(String name) {
+      try {
+        return player.getProperty(name);
+      } catch (_) {
+        return '?';
+      }
+    }
+
+    final found = <String>[];
+    final vid = read('options/vid');
+    if (vid != 'auto' && vid != '?') {
+      try {
+        player.setProperty('vid', 'auto');
+      } catch (_) {}
+      // Turned off in the background for the file before: expected.
+      if (!videoWasOff) found.add('视频轨 $vid');
+    }
+    final hw = hwdec;
+    if (hw != null &&
+        hw != 'no' &&
+        !_reseeding &&
+        read('options/hwdec') == 'no') {
+      try {
+        player.setProperty('hwdec', hw);
+      } catch (_) {}
+      found.add('硬件解码被关着');
+    }
+    if (found.isNotEmpty) {
+      _startup?.mark('上一个视频留下：${found.join('，')}，已恢复');
+    }
   }
 
   /// Reopens the video where its stream broke off: fresh addresses (a long
@@ -1620,6 +1684,36 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
       ..done = true;
     _ripperProxy?.onTrace = null;
     if (trace.elapsed >= 1500) Utils.reportError(trace.report);
+    _checkShown(trace);
+  }
+
+  /// mpv has a picture and plays: a second on, the page should have it to
+  /// show. A black picture of that kind is logged with what was missing.
+  void _checkShown(_StartupTrace trace) {
+    if (onlyPlayAudio.value) return;
+    final player = _videoPlayerController;
+    Future<void>.delayed(const Duration(seconds: 1), () {
+      if (!identical(_startup, trace) ||
+          !identical(_videoPlayerController, player) ||
+          _playerCount == 0) {
+        return;
+      }
+      final ctr = _videoController;
+      final rect = ctr?.rect.value;
+      final shown =
+          ctr?.id.value != null &&
+          rect != null &&
+          rect.width > 1 &&
+          rect.height > 1 &&
+          ctr!.player.state.width > 0 &&
+          !stalePicture.value;
+      if (shown) return;
+      Utils.reportError(
+        '[画面没显示] ${trace.label}，起播 ${trace.elapsed}ms，'
+        '${player == null ? '' : _videoState(player)} '
+        '${_shownState()} 遮挡 ${stalePicture.value}',
+      );
+    });
   }
 
   /// A seek asked for by the user (the progress bar, a gesture, a time in a
@@ -2291,7 +2385,25 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
         'audio-pts ${read('audio-pts')} '
         'ao ${read('current-ao')} '
         '缓存时长 ${read('demuxer-cache-duration')} '
+        // No picture: the decoder gave none (video-params), or the output
+        // took none (video-out-params), or the page shows none.
+        '选轨 ${read('options/vid')} '
+        '解码输出 ${read('video-params/w')}x${read('video-params/h')} '
+        'vo ${read('current-vo')} '
+        'vo输出 ${read('video-out-params/w')}x${read('video-out-params/h')} '
+        '${_shownState()} '
         '${_audioSessionFailure ?? '音频会话正常'}';
+  }
+
+  /// What the page's video widget has to show the picture with.
+  String _shownState() {
+    final ctr = _videoController;
+    if (ctr == null) return '无画面控制器';
+    final rect = ctr.rect.value;
+    final state = ctr.player.state;
+    return '显示 纹理 ${ctr.id.value ?? '-'} '
+        '区域 ${rect == null ? '-' : '${rect.width.toInt()}x${rect.height.toInt()}'} '
+        '尺寸 ${state.width}x${state.height}';
   }
 
   /// 暂停播放

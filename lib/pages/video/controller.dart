@@ -1326,6 +1326,9 @@ class VideoDetailController extends GetxController
       cacheLocalProgress();
     }
 
+    // Another video from here on: not the last frame of this one meanwhile.
+    plPlayerController.hideStalePicture();
+
     playedTime = null;
     defaultST = null;
     videoUrl = null;
