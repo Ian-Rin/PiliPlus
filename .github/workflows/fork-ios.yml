@@ -1,4 +1,9 @@
 # This fork's iOS build on macos-26: every push to main, and by hand.
+# - A push waits 15 minutes on Linux first: pushes come in runs, and each
+#   newer one cancels the run still waiting (see concurrency), so a run of
+#   pushes makes one build on a Mac, of the last. GitHub turned Actions off
+#   for this fork after days of ten Mac builds each. A run started by hand
+#   or by the daily sync builds at once.
 # - New code on main cancels the build still running for older code.
 # - A build that no Mac ever picked up (GitHub's Macs can be out of capacity
 #   for hours) is tried once more. One that failed on a Mac (the code) and one
@@ -46,6 +51,11 @@ jobs:
     outputs:
       build: ${{ steps.check.outputs.build }}
     steps:
+      # A newer push cancels this run while it waits.
+      - name: Wait for more pushes
+        if: github.event_name == 'push'
+        run: sleep 900
+
       - name: Checkout code
         uses: actions/checkout@v7
         with:
