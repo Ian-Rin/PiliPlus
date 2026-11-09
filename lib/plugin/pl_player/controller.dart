@@ -1,5 +1,5 @@
 import 'dart:async' show StreamSubscription, Timer;
-import 'dart:convert' show ascii, utf8;
+import 'dart:convert' show ascii, jsonDecode, utf8;
 import 'dart:io' show HttpClient, HttpHeaders, Platform;
 import 'dart:math' show max, min;
 import 'dart:ui' as ui;
@@ -1981,7 +1981,7 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
       ..label =
           '${_ripperProxy != null ? '线程撕裂者' : '直连'}，'
           '从 ${_seconds(player.state.position)} 跳到 ${_seconds(to)}'
-      ..mark('跳转前 ${_videoState(player)}');
+      ..mark('跳转前 ${_videoState(player)} ${_cacheRanges(player)}');
     _ripperProxy?.onTrace = trace.mark;
     for (final after in const [1, 3, 6]) {
       Future<void>.delayed(Duration(seconds: after), () {
@@ -1997,6 +1997,22 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
       trace.mark('15 秒内没有恢复');
       _endSeekTrace(trace, report: true);
     });
+  }
+
+  /// Where mpv can seek within its cache (a seek elsewhere goes to the
+  /// network): to tell a seek back that reloaded from one the cache had.
+  static String _cacheRanges(Player player) {
+    try {
+      final state = jsonDecode(player.getProperty('demuxer-cache-state'));
+      final ranges = [
+        for (final r in state['seekable-ranges'] as List)
+          '${(r['start'] as num).toStringAsFixed(1)}–'
+              '${(r['end'] as num).toStringAsFixed(1)}s',
+      ];
+      return '缓存可跳 ${ranges.isEmpty ? '无' : ranges.join('、')}';
+    } catch (_) {
+      return '';
+    }
   }
 
   void _endSeekTrace(_StartupTrace trace, {required bool report}) {

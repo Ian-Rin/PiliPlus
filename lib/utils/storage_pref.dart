@@ -904,12 +904,17 @@ abstract final class Pref {
 
   /// Most the cache grows to for a high bitrate (see [initBuffer]).
   static const _maxAutoBuffer = 48 * 0x100000;
-  static const _maxAutoBackBuffer = 48 * 0x100000;
+  static const _maxAutoBackBuffer = 96 * 0x100000;
 
-  /// Behind the playhead: a look back of ten seconds or so lands this far
-  /// back and more (mpv starts at the keyframe before it, a GOP earlier).
-  /// Logs of such looks back on 5874 (ten seconds kept) reloaded often.
-  static const _backSec = 15;
+  /// Behind the playhead, in seconds of the average bitrate: what keeps a
+  /// look back of ten seconds in the cache. mpv seeks in its cache only when
+  /// the keyframe before the target is still there, and Bilibili's keyframes
+  /// are 5 s apart: 10 + 5 s. Over its size, mpv prunes a whole GOP (5 s) at
+  /// a time: 5 s more. The bitrate given is the average; measured, any 15 s
+  /// ran up to 1.41 times it: 20 s at 1.5 times. Fifteen seconds at 1.25
+  /// times (the size before) held 8 s to look back in a busy scene, and a
+  /// look back of ten seconds reloaded.
+  static const _backSec = 30;
 
   /// mpv stops filling at whichever of [bufferSec] and [bufferSize] comes
   /// first. The size, 4 MB by default, is 8 s of a 1080p video but 3 s of a
@@ -918,7 +923,7 @@ abstract final class Pref {
   /// seconds out of the cache already. With the [bitrate] (bits per second,
   /// video and audio) the size is raised to hold [bufferSec] of it, a quarter
   /// more for its peaks, up to 48 MB; behind the playhead [_backSec] of it,
-  /// up to 48 MB, for seeks back. [bufferSize] stays the least.
+  /// up to 96 MB, for seeks back. [bufferSize] stays the least.
   static Map<String, String> initBuffer([
     double playbackSpeed = 1.0,
     int? bitrate,
@@ -930,7 +935,7 @@ abstract final class Pref {
     if (bitrate != null && bitrate > 0) {
       final need = (bitrate / 8 * bufSec * 1.25).round();
       ahead = max(least, min(need, _maxAutoBuffer));
-      final back = (bitrate / 8 * _backSec * 1.25).round();
+      final back = (bitrate / 8 * _backSec).round();
       behind = max(least, min(back, _maxAutoBackBuffer));
     }
     return {
