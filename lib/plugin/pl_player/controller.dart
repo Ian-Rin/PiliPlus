@@ -820,7 +820,17 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     if (away > const Duration(minutes: 1)) {
       _ripperClient = BtrRangeProxy.newClient();
     }
-    if (player != null && _addressesExpired()) {
+    // Played to the end: nothing to resume (a log showed the end reopened,
+    // and the reopen at the last frame showed no picture).
+    final ended =
+        player != null &&
+        (playerStatus.isCompleted ||
+            (player.state.duration > Duration.zero &&
+                player.state.duration - player.state.position <
+                    const Duration(seconds: 1)));
+    if (player != null && ended && _addressesExpired()) {
+      trace?.mark('视频地址已过期，但已经播完，不重新打开');
+    } else if (player != null && _addressesExpired()) {
       // Nothing of the old file to mend: a fresh open, decoder and all.
       _videoOffFor = null;
       _hwFailedAway = false;
@@ -2044,7 +2054,9 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
       }
       trace.mark('暂停中，数据已到 ${_seconds(state.buffer)}');
     }
-    _endSeekTrace(trace, report: trace.elapsed >= 2000);
+    // A seek in the cache still decodes from the keyframe before the target
+    // (up to 5 s of pictures): a second or so on 4K. Logged from 0.8 s.
+    _endSeekTrace(trace, report: trace.elapsed >= 800);
   }
 
   // Tries at one place: a network that is still coming back (just back from
