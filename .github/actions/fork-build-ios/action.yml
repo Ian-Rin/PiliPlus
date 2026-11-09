@@ -34,8 +34,23 @@ runs:
 
     - name: Build iOS
       shell: bash
+      # Xcode downloads the Swift packages' binaries (GitHub release assets)
+      # on every build, and GitHub answers one with a 504 now and then: the
+      # build is tried again then, up to three times. Any other failure ends
+      # it at once.
       run: |
-        flutter build ios --release --no-codesign --dart-define-from-file=pili_release.json --no-pub
+        log="$RUNNER_TEMP/flutter-build-ios.log"
+        for attempt in 1 2 3; do
+          if flutter build ios --release --no-codesign --dart-define-from-file=pili_release.json --no-pub 2>&1 | tee "$log"; then
+            break
+          fi
+          if [ "$attempt" -lt 3 ] && grep -qE 'resolve (Swift Package Manager|package) dependencies' "$log"; then
+            echo "::warning::Swift 包下载失败（第 $attempt 次），60 秒后重试"
+            sleep 60
+            continue
+          fi
+          exit 1
+        done
         ln -sf ./build/ios/iphoneos Payload
         # make AltSign happy...
         find Payload/Runner.app/Frameworks -type d -name "*.framework" -exec codesign --force --sign - --preserve-metadata=identifier,entitlements {} \;
