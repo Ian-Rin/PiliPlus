@@ -9,6 +9,29 @@ import 'package:thread_ripper/auto_concurrency.dart';
 import 'package:thread_ripper/btr/http_fetch.dart';
 import 'package:thread_ripper/btr/range_proxy.dart';
 
+/// An ftyp box, then a version-0 sidx (timescale ms): [sizes] and
+/// [durations] of the fragments, the first right after the sidx.
+Uint8List mp4Head(List<int> sizes, List<int> durations) {
+  final b = BytesBuilder();
+  void u32(int v) =>
+      b.add([v >> 24 & 255, v >> 16 & 255, v >> 8 & 255, v & 255]);
+  u32(16);
+  b.add('ftypisom'.codeUnits);
+  u32(0);
+  u32(32 + 12 * sizes.length);
+  b.add('sidx'.codeUnits);
+  for (final v in [0, 1, 1000, 0, 0]) {
+    u32(v);
+  }
+  b.add([0, 0, sizes.length >> 8, sizes.length & 255]);
+  for (var i = 0; i < sizes.length; i++) {
+    u32(sizes[i]);
+    u32(durations[i]);
+    u32(0x90000000);
+  }
+  return b.toBytes();
+}
+
 void main() {
   late HttpServer cdn;
   late HttpClient client;
@@ -621,6 +644,37 @@ void main() {
     final after = requests.skip(before).toList();
     expect(after, isNotEmpty);
     expect(after.every((r) => r.$2 >= 65536 + 3 * 1024 * 1024), isTrue);
+  });
+
+  // A video resumed from the history: mpv reads the head, then asks from
+  // the fragment holding the start. Those windows download as the head
+  // comes in, and the head read first does not drop them.
+  test('a start away from the beginning downloads there ahead', () async {
+    const fragment = 1000000;
+    final head = mp4Head(
+      [fragment - 100, 1500000, 1400000],
+      [5000, 5000, 5000],
+    );
+    final anchor = head.length;
+    source = Uint8List.fromList(List.generate(4000000, (i) => (i * 7) % 251));
+    source.setRange(0, head.length, head);
+    // The second fragment (5 s on) starts at [fragment] + anchor - 100.
+    final at = anchor + fragment - 100;
+    final notes = <String>[];
+    proxy.onTrace = notes.add;
+    final url = proxy.registerCandidates([
+      endpoint('/good'),
+    ], startAt: const Duration(seconds: 7));
+    await Future<void>.delayed(const Duration(milliseconds: 800));
+    expect(notes, contains('video 从 7 秒开始：先下载字节 $at 起的窗口'));
+    expect(requests.any((r) => r.$2 == at), isTrue);
+    final head0 = await fetch(url, range: 'bytes=0-1023');
+    expect(head0.$2, source.sublist(0, 1024));
+    final before = requests.where((r) => r.$2 == at).length;
+    final result = await fetch(url, range: 'bytes=$at-');
+    expect(result.$2, source.sublist(at));
+    expect(notes, contains('video 用提前下好的窗口'));
+    expect(requests.where((r) => r.$2 == at).length, before);
   });
 
   test('a request elsewhere leaves the windows downloaded ahead', () async {

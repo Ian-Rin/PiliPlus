@@ -19,6 +19,7 @@ import 'package:thread_ripper/btr/fetch.dart';
 import 'package:thread_ripper/btr/http_fetch.dart';
 import 'package:thread_ripper/btr/range_core.dart';
 import 'package:thread_ripper/btr/resolver.dart';
+import 'package:thread_ripper/btr/sidx.dart';
 import 'package:thread_ripper/cdn_resolver.dart';
 
 /// What [BtrRangeProxy.revive] found.
@@ -256,10 +257,14 @@ class BtrRangeProxy {
   /// [warmBytes]: that much after the head downloads too, in the windows
   /// mpv's first request will take, before it asks (a video made ready
   /// ahead of time). At least the first window when above 0.
+  /// [startAt]: where playback will start (a video resumed from the
+  /// history): the windows there download as soon as the head is in (see
+  /// [_warmAtStart]).
   String register(
     Iterable<String> urls, {
     bool isAudio = false,
     int warmBytes = 0,
+    Duration? startAt,
   }) {
     final originals = urls
         .map(Uri.parse)
@@ -277,6 +282,7 @@ class BtrRangeProxy {
           : const [],
       isAudio: isAudio,
       warmBytes: warmBytes,
+      startAt: startAt,
     );
   }
 
@@ -287,6 +293,7 @@ class BtrRangeProxy {
     List<Uri> boost = const [],
     bool isAudio = false,
     int warmBytes = 0,
+    Duration? startAt,
   }) {
     if (_closed || _server == null || urls.isEmpty) {
       throw StateError('No download session or media candidates');
@@ -305,8 +312,9 @@ class BtrRangeProxy {
       ),
       isAudio ? 'audio' : 'video',
     );
-    if (prefetchHeads || warmBytes > 0) {
-      _prefetchHead(track, warmBytes: warmBytes);
+    final resume = startAt != null && startAt > Duration.zero ? startAt : null;
+    if (prefetchHeads || warmBytes > 0 || resume != null) {
+      _prefetchHead(track, warmBytes: warmBytes, startAt: resume);
     }
     return 'http://127.0.0.1:$_port$id';
   }
@@ -316,7 +324,11 @@ class BtrRangeProxy {
   /// player asks for both init segments at once; fetching every head here as
   /// soon as the track is known does the same. A failure is forgotten: the
   /// request probes again, and answers 502 if that fails too.
-  void _prefetchHead(_Track track, {int warmBytes = 0}) {
+  void _prefetchHead(
+    _Track track, {
+    int warmBytes = 0,
+    Duration? startAt,
+  }) {
     final job = RipperAbortController();
     _jobs.add(job);
     track.headLoad = _probe(track, job.signal, fromStart: true)
@@ -324,6 +336,7 @@ class BtrRangeProxy {
           (bytes) {
             track.head = bytes;
             onTrace?.call('${track.kind} 开头已取到');
+            if (startAt != null && _warmAtStart(track, startAt)) return;
             if (warmBytes > 0) _warmWindows(track, warmBytes);
           },
           onError: (Object _) => onTrace?.call('${track.kind} 提前取开头失败'),
@@ -336,7 +349,7 @@ class BtrRangeProxy {
   /// Logs showed a start's head and first window take two to five seconds
   /// between them on a distant CDN, and a start from the first window alone
   /// wait half a second a moment later, for the next.
-  void _warmWindows(_Track track, int bytes) {
+  void _warmWindows(_Track track, int bytes, {int? at}) {
     final total = track.total;
     final head = track.head;
     if (_closed || total == null || head == null || head.length >= total) {
@@ -344,8 +357,8 @@ class BtrRangeProxy {
     }
     final job = RipperAbortController();
     _jobs.add(job);
-    final last = min(total - 1, head.length + bytes - 1);
-    var from = head.length;
+    var from = at ?? head.length;
+    final last = min(total - 1, from + bytes - 1);
     var first = true;
     final windows = <_Window>[];
     do {
@@ -376,8 +389,37 @@ class BtrRangeProxy {
         .whenComplete(() => _jobs.remove(job));
   }
 
+  /// A start away from the beginning: mpv reads the head, then seeks to
+  /// the fragment that holds [startAt] and asks from there, one track after
+  /// the other. Logs of videos resumed from the history showed that second
+  /// request after the head, the audio's another second later, and the
+  /// start taking 3.7 to 7.6 s against 1.5 s from the beginning. The
+  /// fragment is found in the head's index (sidx), and its first windows
+  /// download for both tracks at once, as the head comes in. True if they
+  /// do.
+  bool _warmAtStart(_Track track, Duration startAt) {
+    final head = track.head;
+    final total = track.total;
+    if (head == null || total == null) return false;
+    final at = sidxFragmentAt(head, startAt);
+    if (at == null || at < head.length || at >= total) return false;
+    onTrace?.call(
+      '${track.kind} 从 ${startAt.inSeconds} 秒开始：先下载字节 $at 起的窗口',
+    );
+    track.warmForStart = true;
+    _warmWindows(
+      track,
+      windowBytes(kind: track.kind, first: true) +
+          windowBytes(kind: track.kind, first: false),
+      at: at,
+    );
+    return true;
+  }
+
   /// The next window downloaded ahead, if it is [piece]. Any other start
   /// (mpv asked elsewhere) leaves none: they are for one run from the head.
+  /// Windows at a start away from the beginning ([_warmAtStart]) outlast
+  /// the reads before them (the head, read first).
   _Window? _takeWarm(_Track track, RipperPiece piece) {
     if (track.warm.isEmpty) return null;
     final window = track.warm.first;
@@ -387,6 +429,7 @@ class BtrRangeProxy {
       track.warm.removeAt(0);
       return window;
     }
+    if (track.warmForStart && piece.start < window.piece.start) return null;
     track.warm.clear();
     return null;
   }
@@ -810,6 +853,9 @@ class _Track {
   /// [BtrRangeProxy._warmWindows]), in file order; taken by the request
   /// that reads on from the head.
   final warm = <_Window>[];
+
+  /// [warm] is at a start away from the beginning, past the head.
+  bool warmForStart = false;
 }
 
 /// One window's bytes on their way to mpv: kept in order until [attach],

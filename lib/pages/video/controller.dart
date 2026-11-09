@@ -936,6 +936,10 @@ class VideoDetailController extends GetxController
     return next.result;
   }
 
+  /// When this page was made: the start of the wait for the first picture.
+  final _pageAt = DateTime.now();
+  bool _firstQuery = true;
+
   /// The address asked for as this video's card was pressed, when the
   /// first request here asks for just what it asked for: a plain video.
   Future<LoadingState<PlayUrlModel>>? _takePressed() {
@@ -1052,9 +1056,31 @@ class VideoDetailController extends GetxController
       preferCodecs = isWiFi ? Pref.preferCodecs : Pref.preferCodecsCellular;
     }
 
-    final result =
-        await (_takeNext() ??
-            _fetchPlayUrl(first: fromReset ? null : _takePressed()));
+    final askAt = DateTime.now();
+    final next = _takeNext();
+    final pressed = next == null && !fromReset ? _takePressed() : null;
+    final result = await (next ?? _fetchPlayUrl(first: pressed));
+    // For the start's log: the wait before the player had the video.
+    if (_firstQuery) {
+      _firstQuery = false;
+      plPlayerController.noteBeforeOpen(_pageAt, '进入视频页');
+      if (pressed != null && PlayUrlPrefetch.lastTakenAt != null) {
+        plPlayerController.noteBeforeOpen(
+          PlayUrlPrefetch.lastTakenAt!,
+          '按下卡片，开始取播放地址',
+        );
+      }
+    }
+    plPlayerController
+      ..noteBeforeOpen(
+        askAt,
+        next != null
+            ? '用提前取好的下一集地址'
+            : pressed != null
+            ? '等按下卡片时发出的地址请求'
+            : '开始取播放地址',
+      )
+      ..noteBeforeOpen(DateTime.now(), '取到播放地址');
 
     if (result case Success(:final response)) {
       data = response;

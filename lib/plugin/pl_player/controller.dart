@@ -92,12 +92,24 @@ class _StartupTrace {
 
   final String kind;
   final _clock = Stopwatch()..start();
+  final _startedAt = DateTime.now();
   final _notes = <String>[];
   final _once = <String>{};
   String label = '';
   bool done = false;
 
   int get elapsed => _clock.elapsedMilliseconds;
+
+  /// How long before this trace began its earliest note was (the card
+  /// pressed, the page opened): the black the user saw is that and more.
+  int before = 0;
+
+  /// What happened before the video was set, at negative times.
+  void earlier(DateTime at, String note) {
+    final ms = at.difference(_startedAt).inMilliseconds;
+    if (-ms > before) before = -ms;
+    _notes.add('${ms}ms $note');
+  }
 
   bool has(String key) => _once.contains(key);
 
@@ -111,7 +123,10 @@ class _StartupTrace {
     if (_notes.length < 40) _notes.add('${elapsed}ms $note');
   }
 
-  String get report => '[$kind] $label，共 ${elapsed}ms\n${_notes.join('\n')}';
+  String get report =>
+      '[$kind] $label，共 ${elapsed}ms'
+      '${before > 0 ? '（从按下卡片或进入页面算共 ${elapsed + before}ms）' : ''}'
+      '\n${_notes.join('\n')}';
 }
 
 /// What the player did around a trip to the background (see
@@ -1280,6 +1295,14 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     try {
       _processing = true;
       final trace = _startup = _StartupTrace();
+      final now = DateTime.now();
+      _beforeOpen.sort((a, b) => a.$1.compareTo(b.$1));
+      for (final (at, note) in _beforeOpen) {
+        if (now.difference(at) < const Duration(seconds: 30)) {
+          trace.earlier(at, note);
+        }
+      }
+      _beforeOpen.clear();
       // A seek in the video before is over.
       if (_seekTrace case final seek? when !seek.done) {
         _endSeekTrace(seek, report: false);
@@ -1807,12 +1830,16 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
           proxy.close();
           return;
         }
-        video = proxy.register(dataSource.videoCandidates!);
+        // A start away from the beginning (resumed from the history): both
+        // tracks download there as soon as their heads are in.
+        final startAt = isLive ? null : seekTo;
+        video = proxy.register(dataSource.videoCandidates!, startAt: startAt);
         if (audioSource?.isNotEmpty == true &&
             dataSource.audioCandidates?.isNotEmpty == true) {
           audioSource = proxy.register(
             dataSource.audioCandidates!,
             isAudio: true,
+            startAt: startAt,
           );
         }
       } catch (_) {
@@ -1925,6 +1952,14 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
 
   _StartupTrace? _startup;
 
+  /// What the page did before it set the video (see [noteBeforeOpen]).
+  final _beforeOpen = <(DateTime, String)>[];
+
+  /// A step before the video is set (the card pressed, the page opened, the
+  /// play address fetched), for the start's log: its time counted from the
+  /// player opening the video alone left out the wait before it.
+  void noteBeforeOpen(DateTime at, String note) => _beforeOpen.add((at, note));
+
   /// A start that took longer than 1.5 s goes to the in-app logs (设置 →
   /// 日志) with its timeline, from the video being set to the playhead moving
   /// with a picture: where a black start spends its time, without guessing.
@@ -1936,7 +1971,7 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
       ..mark('画面开始走 ${position.inMilliseconds}ms')
       ..done = true;
     _ripperProxy?.onTrace = null;
-    if (trace.elapsed >= 1500) Utils.reportError(trace.report);
+    if (trace.elapsed + trace.before >= 1500) Utils.reportError(trace.report);
     _checkShown(trace);
   }
 

@@ -29,6 +29,9 @@ abstract final class PlayUrlPrefetch {
   })?
   _last;
 
+  /// When the press whose address [take] gave last happened.
+  static DateTime? lastTakenAt;
+
   /// Signed addresses last a couple of hours; this is for a tap right after.
   static const _freshFor = Duration(minutes: 2);
 
@@ -86,6 +89,7 @@ abstract final class PlayUrlPrefetch {
         DateTime.now().difference(last.at) > _freshFor) {
       return null;
     }
+    lastTakenAt = last.at;
     return last.result;
   }
 }
