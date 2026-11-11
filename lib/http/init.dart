@@ -136,9 +136,14 @@ class Request {
   /// How long an idle connection to Bilibili's API is kept. Fifteen
   /// seconds had a video opened after a little browsing open its play
   /// address request with a new TCP and TLS round (from abroad, a few
-  /// hundred milliseconds more before every start); its servers keep one
-  /// open about a minute.
-  static const _apiIdleTimeout = Duration(seconds: 60);
+  /// hundred milliseconds more before every start).
+  ///
+  /// Its servers close one idle for 60 s (measured on api., app. and
+  /// grpc.biliapi.net, HTTP/1.1 and HTTP/2 alike: a FIN, or a GOAWAY, at
+  /// 59–60 s). Kept as long, a request sent as the server closed went out
+  /// on a dead connection and failed; ten seconds less leaves the server's
+  /// close, and a round trip, well clear.
+  static const _apiIdleTimeout = Duration(seconds: 50);
 
   static (IOHttpClientAdapter, ConnectionManager?) _createPool() {
     final bool enableSystemProxy;
@@ -188,6 +193,8 @@ class Request {
 
   @pragma('vm:notify-debugger-on-exception')
   static void _resetAdaptersForNetworkChange() {
+    NetworkErrorLog.poolResetAt = DateTime.now();
+    NetworkErrorLog.poolResets++;
     try {
       final (h11, connectionManager) = _createPool();
       if (connectionManager != null) {
