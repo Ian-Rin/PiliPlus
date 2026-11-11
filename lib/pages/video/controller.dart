@@ -380,6 +380,8 @@ class VideoDetailController extends GetxController
       this.subtitles.assignAll(subtitles);
       vttSubtitlesIndex.value = 0;
     }
+    // volume
+    volume = entry.volume;
     firstVideo = VideoItem(
       id: entry.preferedVideoQuality,
       quality: VideoQuality.fromCode(entry.preferedVideoQuality),
@@ -1513,6 +1515,9 @@ class VideoDetailController extends GetxController
     if (plPlayerController.showViewPoints) {
       viewPointList.clear();
     }
+
+    // volume
+    volume = null;
 
     if (!isFileSource) {
       // language
