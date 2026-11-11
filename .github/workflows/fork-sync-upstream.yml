@@ -87,13 +87,16 @@ jobs:
         if: steps.merge.outputs.result == 'merged'
         shell: bash
         run: |
+          # The analysis takes in packages/thread_ripper's tests too, which
+          # import its own dev dependencies (package:test): those first, or
+          # every test file is an error.
+          (cd packages/thread_ripper && dart pub get)
           # Errors only: upstream's code carries infos and warnings.
           if ! flutter analyze --no-fatal-infos --no-fatal-warnings; then
             echo "**合并后代码有错误（flutter analyze），没有推送。**" >> "$GITHUB_STEP_SUMMARY"
             exit 1
           fi
           cd packages/thread_ripper
-          dart pub get
           if ! dart test; then
             echo "**合并后线程撕裂者的测试失败，没有推送。**" >> "$GITHUB_STEP_SUMMARY"
             exit 1
