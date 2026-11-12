@@ -144,7 +144,14 @@ class _BackgroundTrace {
   /// and no more than that are let in.
   int warnings = 0;
 
-  void mark(String note) {
+  /// Something went wrong on the trip (a decoder that failed again, a
+  /// warning or an error of mpv's, a proxy that had to be brought back): a
+  /// trip without is not logged. Two days of logs held 188 trips, most of
+  /// them a decoder rebuilt once and playing on.
+  late bool notable = kind != '后台切换';
+
+  void mark(String note, {bool notable = false}) {
+    if (notable) this.notable = true;
     if (done || _notes.length >= 40) return;
     _notes.add(
       '${(_clock.elapsedMilliseconds / 1000).toStringAsFixed(1)}s $note',
@@ -733,8 +740,18 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     final trace = _bgTrace;
     Future<void>.delayed(after, () {
       if (!identical(_bgTrace, trace) || trace!.done) return;
+      final player = _videoPlayerController;
+      final hw = hwdec;
+      if (player != null &&
+          hw != null &&
+          hw != 'no' &&
+          !onlyPlayAudio.value &&
+          !identical(_videoOffFor, player) &&
+          _decoderNow(player) == 'no') {
+        trace.mark('结束时仍是软件解码', notable: true);
+      }
       trace.done = true;
-      Utils.reportError(trace.report);
+      if (trace.notable) Utils.reportError(trace.report);
     });
   }
 
@@ -817,11 +834,15 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     // before mpv has played what it buffered and asks the proxy for more.
     if (_ripperProxy case final proxy?) {
       proxy.revive().then((revival) {
-        trace?.mark(switch (revival) {
-          ProxyRevival.alive => '加速代理正常',
-          ProxyRevival.relistened => '加速代理的端口被系统收回，已在原端口重新监听',
-          ProxyRevival.failed => '加速代理恢复失败（之后断流会换新代理重新加载）：${proxy.reviveError}',
-        });
+        trace?.mark(
+          switch (revival) {
+            ProxyRevival.alive => '加速代理正常',
+            ProxyRevival.relistened => '加速代理的端口被系统收回，已在原端口重新监听',
+            ProxyRevival.failed =>
+              '加速代理恢复失败（之后断流会换新代理重新加载）：${proxy.reviveError}',
+          },
+          notable: revival != ProxyRevival.alive,
+        );
         // Worth a log entry however short the time away.
         if (revival != ProxyRevival.alive && trace != null && !trace.done) {
           _reportBackgroundLater(const Duration(seconds: 6));
@@ -852,6 +873,7 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
       final at = player.state.position;
       trace?.mark(
         '离开 ${away.inMinutes} 分钟，视频地址已过期，换新地址从 ${_seconds(at)} 重新打开',
+        notable: true,
       );
       if (trace != null && !trace.done) {
         _reportBackgroundLater(const Duration(seconds: 6));
@@ -917,6 +939,19 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     final hw = hwdec;
     if (onlyPlayAudio.value || hw == null || hw == 'no') return;
     if (_reseeding) return;
+    if (isLive) {
+      // A live stream cannot be seeked (mpv: "Cannot seek in this stream"),
+      // so the new decoder got no keyframe to start on: logs showed the
+      // playhead and the frame count stand still for seconds after such a
+      // rebuild, and a third of the trips end on the software decoder. The
+      // stream is opened again instead, which starts on a keyframe with a
+      // decoder of its own; only where the decoder did fall back, as that
+      // costs a second or two of spinner.
+      if (_decoderNow(player) != 'no' || !player.state.playing) return;
+      _bgTrace?.mark('直播不能跳转：重新打开直播流，用新的硬件解码器');
+      refreshPlayer();
+      return;
+    }
     _reseeding = true;
     () async {
       bool current() =>
@@ -1014,7 +1049,7 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
       _sampleLater(player, const Duration(seconds: 3), '3 秒后');
       _reportBackgroundLater(const Duration(seconds: 4));
     } else {
-      trace.mark('$why（解码器 no）');
+      trace.mark('$why（解码器 no）', notable: true);
       // A trip under two seconds plans no report of its own; the earliest
       // planned one goes, the later ones find it done.
       _sampleLater(player, const Duration(seconds: 2), '重建后 2 秒');
@@ -1108,7 +1143,7 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
       // After the pages have been told (nothing left to do then).
       onShow: () => Timer.run(() {
         if (_backgroundSince != null) {
-          _bgTrace?.mark('视频页没收到回到前台');
+          _bgTrace?.mark('视频页没收到回到前台', notable: true);
           _backFromAway(_videoPlayerController);
         }
         _endResumeWatch();
@@ -1960,7 +1995,7 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
   /// player opening the video alone left out the wait before it.
   void noteBeforeOpen(DateTime at, String note) => _beforeOpen.add((at, note));
 
-  /// A start that took longer than 1.5 s goes to the in-app logs (设置 →
+  /// A start that took longer than 2.5 s goes to the in-app logs (设置 →
   /// 日志) with its timeline, from the video being set to the playhead moving
   /// with a picture: where a black start spends its time, without guessing.
   void _traceStartup(Duration position) {
@@ -1971,8 +2006,62 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
       ..mark('画面开始走 ${position.inMilliseconds}ms')
       ..done = true;
     _ripperProxy?.onTrace = null;
-    if (trace.elapsed + trace.before >= 1500) Utils.reportError(trace.report);
+    if (trace.elapsed + trace.before >= 2500) Utils.reportError(trace.report);
     _checkShown(trace);
+  }
+
+  DateTime _sizeLookedAt = DateTime(0);
+
+  /// media_kit sets the picture's size to 0 as a file is opened and takes
+  /// the new file's from mpv's change of video-out-params; the page shows no
+  /// picture while it is 0. mpv tells a client of a change only if the value
+  /// differs from the one the client last had: a next video of the same
+  /// size, open before the client looked in between (its data downloaded
+  /// ahead, the picture there within a tenth of a second), is no change, and
+  /// the size stayed 0. Logs showed such starts in a list of videos: sound,
+  /// the playhead moving, frames decoded, a size of 0x0 on the page and a
+  /// black picture until the video was left. With the playhead moving and
+  /// the size still 0, it is read from mpv and given to media_kit here.
+  void _mendPictureSize(Player player, Duration position) {
+    if (player.state.width > 0 ||
+        position <= Duration.zero ||
+        onlyPlayAudio.value) {
+      return;
+    }
+    final now = DateTime.now();
+    if (now.difference(_sizeLookedAt) < const Duration(milliseconds: 250)) {
+      return;
+    }
+    _sizeLookedAt = now;
+    int? read(String name) {
+      try {
+        return int.tryParse(player.getProperty(name));
+      } catch (_) {
+        return null;
+      }
+    }
+
+    final dw = read('video-out-params/dw');
+    final dh = read('video-out-params/dh');
+    if (dw == null || dh == null || dw <= 0 || dh <= 0) return;
+    // As media_kit does: turned by 90 or 270 degrees, the sides swap.
+    final turned = (read('video-out-params/rotate') ?? 0) % 180 != 0;
+    final width = turned ? dh : dw;
+    final height = turned ? dw : dh;
+    player.state
+      ..width = width
+      ..height = height;
+    // What media_kit does itself on mpv's change of video-out-params.
+    // ignore: invalid_use_of_protected_member
+    final sizes = player.sizeController;
+    if (!sizes.isClosed) sizes.add((width, height));
+    _startup
+      ?..mark('mpv 没有报新画面的尺寸，已补上')
+      ..mark('解码出第一帧 ${dw}x$dh', once: 'frame');
+    Utils.reportError(
+      '[画面尺寸补报] ${width}x$height，位置 ${_seconds(position)}，'
+      '起播 ${_startup?.elapsed ?? -1}ms',
+    );
   }
 
   /// mpv has a picture and plays: a second on, the page should have it to
@@ -1986,6 +2075,9 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
           _playerCount == 0) {
         return;
       }
+      // The page is on its way to another video (it hides this one's last
+      // picture itself): logs showed that taken for a black picture.
+      if (stalePicture.value) return;
       final ctr = _videoController;
       final rect = ctr?.rect.value;
       final shown =
@@ -2018,6 +2110,7 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     // A start still going traces this too.
     if (_startup case final startup? when !startup.done) return;
     _seekTarget = to;
+    _seekInCache = _cached(player, to);
     if (_seekTrace case final trace? when !trace.done) {
       trace.mark('又跳到 ${_seconds(to)}');
       return;
@@ -2032,6 +2125,8 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
       Future<void>.delayed(Duration(seconds: after), () {
         if (trace.done || !identical(_videoPlayerController, player)) return;
         trace.mark('$after 秒 ${_videoState(player)}');
+        // Paused, nothing may change once the seek is over.
+        _seekProgress(player);
       });
     }
     Future<void>.delayed(const Duration(seconds: 15), () {
@@ -2042,6 +2137,26 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
       trace.mark('15 秒内没有恢复');
       _endSeekTrace(trace, report: true);
     });
+  }
+
+  /// The seek's target was in mpv's cache as it was asked for: a paused seek
+  /// there is over once mpv has done it, however far past the target the
+  /// cache reaches. (Logs showed such seeks, the cache 48 s and 61 s past
+  /// the target, logged as not recovered in 15 s.)
+  bool _seekInCache = false;
+
+  static bool _cached(Player player, Duration at) {
+    try {
+      final state = jsonDecode(player.getProperty('demuxer-cache-state'));
+      final seconds = at.inMilliseconds / 1000;
+      for (final r in state['seekable-ranges'] as List) {
+        if (seconds >= (r['start'] as num) &&
+            seconds + 0.3 <= (r['end'] as num)) {
+          return true;
+        }
+      }
+    } catch (_) {}
+    return false;
   }
 
   /// Where mpv can seek within its cache (a seek elsewhere goes to the
@@ -2083,15 +2198,29 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
       if (!justPast(state.position, const Duration(seconds: 5))) return;
       trace.mark('画面开始走 ${_seconds(state.position)}');
     } else {
-      if ((state.position - _seekTarget).abs() > const Duration(seconds: 1) ||
-          !justPast(state.buffer, const Duration(seconds: 30))) {
+      if ((state.position - _seekTarget).abs() > const Duration(seconds: 1)) {
+        return;
+      }
+      if (_seekInCache) {
+        // The cache held the target before the seek and holds it now: mpv
+        // saying the seek is over is all there is to wait for.
+        if (state.buffer < _seekTarget + const Duration(milliseconds: 300)) {
+          return;
+        }
+        try {
+          if (player.getProperty('seeking') != 'no') return;
+        } catch (_) {
+          return;
+        }
+      } else if (!justPast(state.buffer, const Duration(seconds: 30))) {
         return;
       }
       trace.mark('暂停中，数据已到 ${_seconds(state.buffer)}');
     }
     // A seek in the cache still decodes from the keyframe before the target
-    // (up to 5 s of pictures): a second or so on 4K. Logged from 0.8 s.
-    _endSeekTrace(trace, report: trace.elapsed >= 800);
+    // (up to 5 s of pictures): about 0.9 s, as two days of logs showed (41
+    // entries that said no more). Logged from 2 s.
+    _endSeekTrace(trace, report: trace.elapsed >= 2000);
   }
 
   // Tries at one place: a network that is still coming back (just back from
@@ -2412,6 +2541,7 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
         if (_staleFromFileBefore(position)) return;
         if (_holdJumpToEnd(player, position)) return;
         if (position > Duration.zero) _lastGoodPosition = position;
+        _mendPictureSize(player, position);
         _traceStartup(position);
         _checkNearEnd(player, position);
         _seekProgress(player);
@@ -2488,12 +2618,7 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
       // its query (the signature, the account's mid), as users paste these.
       stream.log.listen(((PlayerLog log) {
         if (log.level == 'error' || log.level == 'fatal') {
-          Utils.reportError(
-            '${log.level}: ${log.prefix}: '
-            '${log.text.replaceAllMapped(_signedQuery, (m) => '${m[1]}?…')}'
-            '${kDebugMode ? '\n${player.state.playlist}' : ''}',
-            null,
-          );
+          _noteMpvError(log);
         } else {
           // Per frame, after the hardware decoder was up: not a video it
           // cannot do (that fails as the decoder is made).
@@ -2511,6 +2636,7 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
             trace.mark(
               'mpv 警告 ${log.prefix}: '
               '${log.text.replaceAllMapped(_signedQuery, (m) => '${m[1]}?…')}',
+              notable: true,
             );
           }
           if (kDebugMode) debugPrint(log.toString());
@@ -2572,7 +2698,9 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
               event.startsWith("Can not open")) {
             return;
           }
-          if (!kDebugMode) {
+          // media_kit makes these of mpv's error lines, which are logged as
+          // they come ([_noteMpvError]): only what is not one of them.
+          if (!kDebugMode && !_mpvErrorTexts.remove(event)) {
             Utils.reportError('$event\n${player.state.playlist}');
           }
           // SmartDialog.showToast('视频加载错误, $event');
@@ -2587,6 +2715,60 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     _subscriptions?.clear();
     _subscriptions = null;
   }
+
+  /// mpv's error lines of the last moments, for the error stream to tell its
+  /// copies of them by.
+  final _mpvErrorTexts = <String>{};
+
+  /// mpv's errors by kind (their numbers left out), with how many of each,
+  /// until [_mpvErrorFlush] logs them as one entry.
+  final _mpvErrors = <String, (String, int)>{};
+  Timer? _mpvErrorFlush;
+
+  /// mpv's own errors (release builds log only those) go to the in-app logs:
+  /// a stalled or frozen player otherwise leaves no trace. They come in
+  /// bursts (a decoder rebuilt after a trip to the background says the same
+  /// thing of every frame up to the next keyframe), and two days of logs
+  /// held some 900 entries of them, each with the device's description,
+  /// most beside a trip that was logged anyway. Around such a trip they go
+  /// into its entry; otherwise a burst is one entry, each kind of line once
+  /// with its count. An address in mpv's text goes without its query (the
+  /// signature, the account's mid), as users paste these.
+  void _noteMpvError(PlayerLog log) {
+    if (_mpvErrorTexts.length >= 64) _mpvErrorTexts.clear();
+    _mpvErrorTexts.add(log.text);
+    final line =
+        '${log.prefix}: '
+        '${log.text.replaceAllMapped(_signedQuery, (m) => '${m[1]}?…')}';
+    final trace = _bgTrace;
+    if (trace != null && !trace.done) {
+      if (trace.warnings < 15) {
+        trace.warnings++;
+        trace.mark('mpv 报错 $line', notable: true);
+      } else {
+        trace.notable = true;
+      }
+      return;
+    }
+    final kind = line.replaceAll(_digits, 'N');
+    final seen = _mpvErrors[kind];
+    if (seen != null) {
+      _mpvErrors[kind] = (seen.$1, seen.$2 + 1);
+    } else if (_mpvErrors.length < 12) {
+      _mpvErrors[kind] = (line, 1);
+    }
+    _mpvErrorFlush ??= Timer(const Duration(seconds: 5), () {
+      _mpvErrorFlush = null;
+      final lines = [
+        for (final (text, count) in _mpvErrors.values)
+          count > 1 ? '$text（同类 $count 条）' : text,
+      ];
+      _mpvErrors.clear();
+      if (lines.isNotEmpty) Utils.reportError('[mpv 报错]\n${lines.join('\n')}');
+    });
+  }
+
+  static final _digits = RegExp(r'-?\d+');
 
   /// 跳转至指定位置
   Future<void> seekTo(Duration position) async {
