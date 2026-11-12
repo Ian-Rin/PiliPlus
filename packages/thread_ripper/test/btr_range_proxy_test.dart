@@ -627,6 +627,59 @@ void main() {
     expect(again.$2, source.sublist(70000));
   });
 
+  /// How far past what a reader of [url] has received the proxy asked the
+  /// CDN for, at each chunk: the reader waits [pause] after each one.
+  Future<List<(int, int)>> leads(String url, Duration pause) async {
+    final res = await (await client.getUrl(Uri.parse(url))).close();
+    final out = <(int, int)>[];
+    var received = 0;
+    final done = Completer<void>();
+    late StreamSubscription<List<int>> sub;
+    sub = res.listen(
+      (chunk) {
+        received += chunk.length;
+        final asked = requests.fold(0, (a, r) => max(a, r.$3 + 1));
+        out.add((received, asked - received));
+        if (pause > Duration.zero) {
+          sub.pause();
+          Timer(pause, sub.resume);
+        }
+      },
+      onDone: done.complete,
+      onError: done.completeError,
+    );
+    await done.future;
+    expect(received, source.length);
+    return out;
+  }
+
+  test(
+    'a reader that waits on the download gets windows further ahead',
+    () async {
+      source = Uint8List.fromList(
+        List.generate(24 << 20, (i) => (i * 13) % 251),
+      );
+      final fast = await leads(register(['/good']), Duration.zero);
+      final lead = fast.fold(0, (a, l) => max(a, l.$2));
+      // One window ahead kept it under two windows.
+      expect(lead, greaterThan(3 * 2 * 1024 * 1024));
+    },
+  );
+
+  test('a reader slower than the download keeps one window ahead', () async {
+    source = Uint8List.fromList(List.generate(12 << 20, (i) => (i * 13) % 251));
+    final slow = await leads(
+      register(['/good']),
+      const Duration(milliseconds: 8),
+    );
+    final late = slow.where((l) => l.$1 > source.length ~/ 2);
+    final lead = late.fold(0, (a, l) => max(a, l.$2));
+    // The window being taken and one more, and what the sockets buffer
+    // (it varies, up to about a megabyte). A reader waiting on the
+    // download has more than three windows ahead.
+    expect(lead, lessThanOrEqualTo(2 * 2 * 1024 * 1024 + 1024 * 1024));
+  });
+
   test('the windows downloaded ahead are taken one after another', () async {
     source = Uint8List.fromList(List.generate(4000000, (i) => (i * 13) % 251));
     final notes = <String>[];

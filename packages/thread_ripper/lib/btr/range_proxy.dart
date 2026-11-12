@@ -7,6 +7,7 @@
 // mpv asks for open-ended ranges (bytes=N-) on one connection per track, so a
 // request is served as a run of bounded windows, one downloadRange each.
 import 'dart:async';
+import 'dart:collection';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
@@ -130,6 +131,24 @@ class BtrRangeProxy {
   // Below the 30 to 50 of the window mpv is waiting for: the next window
   // only takes the connections the current one leaves free.
   static const _aheadPriority = 20;
+
+  /// The most windows a request downloads ahead of the one mpv is taking.
+  ///
+  /// One ahead (2 MB of video) left a fast reader waiting: a window's
+  /// pieces, about 400 KiB each once the connections are fast, made five
+  /// requests, and each window waited for its slowest piece, so a few of
+  /// the connections ran at a time. Measured from abroad, a reader taking
+  /// everything got 15 MB/s from Bilibili's overseas nodes with one ahead
+  /// and 47–56 MB/s with up to eight (the network's 50–65 MB/s), from the
+  /// mainland nodes 5 and 14 MB/s; on a phone, mpv got 2–3 MB/s at 3x of a
+  /// 4K video and stalled.
+  ///
+  /// How many is up to the reader (see [_serve]): twice as many each time
+  /// mpv takes a window that has not finished arriving (it is waiting on
+  /// the download), one fewer each time it takes one that has. Playing at
+  /// its normal speed mpv takes windows long done, and one ahead is all a
+  /// seek throws away.
+  int maxAheadWindows = 8;
   bool _closed = false;
 
   /// Startup diagnostics: short notes on a track's requests and first bytes,
@@ -532,7 +551,9 @@ class BtrRangeProxy {
     // Seen by attach(); a window given up before that must not reach the
     // app's zone as an unhandled error.
     result._done.then(
-      (_) => result._markScheduled(),
+      (_) => result
+        ..complete = true
+        .._markScheduled(),
       onError: (Object _) => result
         ..failed = true
         .._markScheduled(),
@@ -686,43 +707,51 @@ class BtrRangeProxy {
           return RipperPiece(0, from, min(end, from + size - 1));
         }
 
-        _Window? ahead;
+        final ahead = ListQueue<_Window>();
         if (cursor <= end) {
           final window = windowAt(cursor, first: true);
           if (_takeWarm(track, window) case final warm?) {
             onTrace?.call('${track.kind} 用提前下好的窗口');
-            ahead = warm;
+            ahead.add(warm);
           } else {
-            ahead = _window(
-              track,
-              window,
-              job.signal,
-              startup: !(track.warmEnd != 0 && window.start == track.warmEnd),
+            ahead.add(
+              _window(
+                track,
+                window,
+                job.signal,
+                startup: !(track.warmEnd != 0 && window.start == track.warmEnd),
+              ),
             );
           }
         }
-        while (ahead != null) {
-          final current = ahead;
+        var nextAt = ahead.isEmpty ? end + 1 : ahead.last.piece.end + 1;
+        var depth = 1;
+        while (ahead.isNotEmpty) {
+          final current = ahead.removeFirst();
           final next = current.piece.end + 1;
+          depth = current.complete
+              ? max(1, depth - 1)
+              : min(maxAheadWindows, depth * 2);
           final attached = current.attach(deliver)..ignore();
           // A start downloads its head first and queues its pieces after it:
           // the next window waits for those, as upstream's prefetch waits for
           // onStartupScheduled, or it would take the connections the first
           // picture needs while the head is on its way.
           await current.scheduled;
-          if (next <= end && !job.signal.aborted) {
-            final window = windowAt(next, first: false);
-            ahead =
-                _takeWarm(track, window) ??
-                _window(
-                  track,
-                  window,
-                  job.signal,
-                  startup: false,
-                  priority: _aheadPriority,
-                );
-          } else {
-            ahead = null;
+          while (ahead.length < depth && nextAt <= end && !job.signal.aborted) {
+            final window = windowAt(nextAt, first: false);
+            nextAt = window.end + 1;
+            // Each further one behind the one before for connections.
+            ahead.add(
+              _takeWarm(track, window) ??
+                  _window(
+                    track,
+                    window,
+                    job.signal,
+                    startup: false,
+                    priority: _aheadPriority - 6 * ahead.length,
+                  ),
+            );
           }
           try {
             await attached;
@@ -868,6 +897,9 @@ class _Window {
 
   /// Whether its download failed (known once it is over).
   bool failed = false;
+
+  /// Whether all of it has arrived.
+  bool complete = false;
   final _scheduled = Completer<void>();
   final _kept = <Uint8List>[];
 
