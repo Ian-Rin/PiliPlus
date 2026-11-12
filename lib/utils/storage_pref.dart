@@ -254,7 +254,10 @@ abstract final class Pref {
     if (codecs is List) {
       return codecs.map((i) => VideoDecodeFormatType.values.byName(i)).toList();
     }
-    return const <VideoDecodeFormatType>[.AVC, .AV1];
+    // HEVC first: about 2/3 of AVC's bitrate for the same picture, and
+    // hardware-decoded on every device this fork targets. AV1 is smaller
+    // still, but whether mpv decodes it in hardware here is unverified.
+    return const <VideoDecodeFormatType>[.HEVC, .AVC];
   }
 
   static List<VideoDecodeFormatType> get preferCodecsCellular {
