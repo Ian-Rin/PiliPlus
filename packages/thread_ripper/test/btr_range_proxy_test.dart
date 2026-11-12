@@ -730,6 +730,77 @@ void main() {
     expect(requests.where((r) => r.$2 == at).length, before);
   });
 
+  // Logs showed mpv ask a fragment before the one downloaded ahead (the
+  // keyframe at or before the start was the last fragment's): its windows
+  // stop where those begin, and go on with them.
+  test('a start a fragment earlier still gets the windows ahead', () async {
+    const fragment = 1000000;
+    final head = mp4Head(
+      [fragment - 100, 1500000, 1400000],
+      [5000, 5000, 5000],
+    );
+    final anchor = head.length;
+    source = Uint8List.fromList(List.generate(4000000, (i) => (i * 7) % 251));
+    source.setRange(0, head.length, head);
+    final second = anchor + fragment - 100;
+    final third = second + 1500000;
+    final notes = <String>[];
+    proxy.onTrace = notes.add;
+    final url = proxy.registerCandidates([
+      endpoint('/good'),
+    ], startAt: const Duration(seconds: 12));
+    await Future<void>.delayed(const Duration(milliseconds: 800));
+    expect(notes, contains('video 从 12 秒开始：先下载字节 $third 起的窗口'));
+    final before = requests.where((r) => r.$2 == third).length;
+    final result = await fetch(url, range: 'bytes=$second-');
+    expect(result.$2, source.sublist(second));
+    expect(requests.where((r) => r.$2 == third).length, before);
+  });
+
+  // A start on a fragment's edge may be either fragment's, and the audio
+  // starts where the video's keyframe is: the fragment before downloads
+  // too, and a start at the later one lets it go.
+  test('a start on a fragment edge downloads the one before too', () async {
+    const fragment = 1000000;
+    final head = mp4Head(
+      [fragment - 100, 1500000, 1400000],
+      [5000, 5000, 5000],
+    );
+    final anchor = head.length;
+    source = Uint8List.fromList(List.generate(4000000, (i) => (i * 7) % 251));
+    source.setRange(0, head.length, head);
+    final second = anchor + fragment - 100;
+    final third = second + 1500000;
+    final notes = <String>[];
+    proxy.onTrace = notes.add;
+    final video = proxy.registerCandidates([
+      endpoint('/good'),
+    ], startAt: const Duration(seconds: 10));
+    final audio = proxy.registerCandidates(
+      [endpoint('/good')],
+      isAudio: true,
+      startAt: const Duration(seconds: 10),
+    );
+    await Future<void>.delayed(const Duration(milliseconds: 1200));
+    for (final kind in ['video', 'audio']) {
+      expect(
+        notes,
+        contains(
+          '$kind 从 10 秒开始：先下载字节 $third 起的窗口'
+          '，和前面 1 个分片（字节 $second 起）',
+        ),
+      );
+    }
+    int asked(int at) => requests.where((r) => r.$2 == at).length;
+    final before = (asked(second), asked(third));
+    // The video at the fragment before, the audio at the one expected.
+    final early = await fetch(video, range: 'bytes=$second-');
+    expect(early.$2, source.sublist(second));
+    final late = await fetch(audio, range: 'bytes=$third-');
+    expect(late.$2, source.sublist(third));
+    expect((asked(second), asked(third)), before);
+  });
+
   test('a request elsewhere leaves the windows downloaded ahead', () async {
     final url = proxy.registerCandidates([
       endpoint('/good'),

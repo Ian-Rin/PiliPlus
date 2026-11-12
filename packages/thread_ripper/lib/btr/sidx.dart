@@ -9,6 +9,46 @@ import 'dart:typed_data';
 /// checked against a Bilibili file (a seek to 60 s read from the fragment
 /// at 55.02 s, the next starting at 60.02 s).
 int? sidxFragmentAt(Uint8List head, Duration at) {
+  final index = sidxIndex(head);
+  return index?.offsets[index.at(at)];
+}
+
+/// The fragments of a fragmented MP4, from the segment index in [head]:
+/// when each starts and where in the file. Null if the head has no complete
+/// plain one.
+class SidxIndex {
+  SidxIndex._(this.timescale, this._times, this.offsets, this.sizes);
+
+  final int timescale;
+
+  /// Each fragment's start, in [timescale] units.
+  final List<int> _times;
+
+  /// Each fragment's first byte in the file, and its length.
+  final List<int> offsets;
+  final List<int> sizes;
+
+  int get length => offsets.length;
+
+  /// The fragment holding [time]: the last starting at or before it (the
+  /// first, for a time before them all).
+  int at(Duration time) {
+    final target =
+        time.inMicroseconds * timescale ~/ Duration.microsecondsPerSecond;
+    var found = 0;
+    for (var i = 0; i < _times.length && _times[i] <= target; i++) {
+      found = i;
+    }
+    return found;
+  }
+
+  /// When fragment [i] starts.
+  Duration start(int i) => Duration(
+    microseconds: _times[i] * Duration.microsecondsPerSecond ~/ timescale,
+  );
+}
+
+SidxIndex? sidxIndex(Uint8List head) {
   final data = ByteData.sublistView(head);
   var box = 0;
   while (box + 8 <= head.length) {
@@ -23,13 +63,13 @@ int? sidxFragmentAt(Uint8List head, Duration at) {
       return null; // to the end of the file: no sidx after it
     }
     if (size < body - box) return null;
-    if (type == 'sidx') return _fragmentAt(data, box, body, size, at);
+    if (type == 'sidx') return _index(data, box, body, size);
     box += size;
   }
   return null;
 }
 
-int? _fragmentAt(ByteData data, int box, int body, int size, Duration at) {
+SidxIndex? _index(ByteData data, int box, int body, int size) {
   if (box + size > data.lengthInBytes) return null;
   var p = body;
   final version = data.getUint8(p);
@@ -52,19 +92,20 @@ int? _fragmentAt(ByteData data, int box, int body, int size, Duration at) {
   final count = data.getUint16(p);
   p += 2;
   if (count == 0 || p + count * 12 > box + size) return null;
-  final target =
-      at.inMicroseconds * timescale ~/ Duration.microsecondsPerSecond;
   var offset = box + size + firstOffset;
-  int? found;
+  final times = <int>[];
+  final offsets = <int>[];
+  final sizes = <int>[];
   for (var i = 0; i < count; i++, p += 12) {
     final reference = data.getUint32(p);
     // A reference to another sidx: not the plain index Bilibili's files have.
     if (reference & 0x80000000 != 0) return null;
-    if (time > target) break;
-    found = offset;
-    offset += reference & 0x7fffffff;
+    final length = reference & 0x7fffffff;
+    times.add(time);
+    offsets.add(offset);
+    sizes.add(length);
+    offset += length;
     time += data.getUint32(p + 4);
   }
-  // Before the first fragment: the first.
-  return found ?? box + size + firstOffset;
+  return SidxIndex._(timescale, times, offsets, sizes);
 }

@@ -332,6 +332,7 @@ class BtrRangeProxy {
       isAudio ? 'audio' : 'video',
     );
     final resume = startAt != null && startAt > Duration.zero ? startAt : null;
+    if (resume != null && !isAudio) _resumeKey = Completer<Duration?>();
     if (prefetchHeads || warmBytes > 0 || resume != null) {
       _prefetchHead(track, warmBytes: warmBytes, startAt: resume);
     }
@@ -355,8 +356,21 @@ class BtrRangeProxy {
           (bytes) {
             track.head = bytes;
             onTrace?.call('${track.kind} 开头已取到');
-            if (startAt != null && _warmAtStart(track, startAt)) return;
-            if (warmBytes > 0) _warmWindows(track, warmBytes);
+            void fromHead() {
+              if (warmBytes > 0) _warmWindows(track, warmBytes);
+            }
+
+            if (startAt == null) return fromHead();
+            // Not waited for: the head is there for mpv's first request
+            // while the audio waits for the video's keyframe time.
+            unawaited(
+              _warmAtStart(track, startAt).then(
+                (warmed) {
+                  if (!warmed) fromHead();
+                },
+                onError: (Object _) {},
+              ),
+            );
           },
           onError: (Object _) => onTrace?.call('${track.kind} 提前取开头失败'),
         )
@@ -374,26 +388,35 @@ class BtrRangeProxy {
     if (_closed || total == null || head == null || head.length >= total) {
       return;
     }
-    final job = RipperAbortController();
-    _jobs.add(job);
     var from = at ?? head.length;
     final last = min(total - 1, from + bytes - 1);
     var first = true;
-    final windows = <_Window>[];
+    final pieces = <RipperPiece>[];
     do {
       final size = windowBytes(kind: track.kind, first: first);
-      windows.add(
-        _window(
-          track,
-          RipperPiece(0, from, min(total - 1, from + size - 1)),
-          job.signal,
-          startup: first,
-          priority: first ? null : _aheadPriority,
-        ),
-      );
+      pieces.add(RipperPiece(0, from, min(total - 1, from + size - 1)));
       from += size;
       first = false;
     } while (from <= last);
+    _warmPieces(track, pieces);
+  }
+
+  /// [pieces], in file order, each downloaded now as a window and kept for
+  /// the request that asks from its first byte ([_takeWarm]).
+  void _warmPieces(_Track track, List<RipperPiece> pieces) {
+    if (_closed || pieces.isEmpty) return;
+    final job = RipperAbortController();
+    _jobs.add(job);
+    final windows = [
+      for (final (i, piece) in pieces.indexed)
+        _window(
+          track,
+          piece,
+          job.signal,
+          startup: i == 0,
+          priority: i == 0 ? null : _aheadPriority,
+        ),
+    ];
     track.warm
       ..clear()
       ..addAll(windows);
@@ -416,40 +439,116 @@ class BtrRangeProxy {
   /// fragment is found in the head's index (sidx), and its first windows
   /// download for both tracks at once, as the head comes in. True if they
   /// do.
-  bool _warmAtStart(_Track track, Duration startAt) {
+  ///
+  /// Which fragment mpv asks for, as later logs showed (7 of 24 such
+  /// downloads were at the wrong place, the request a fragment earlier):
+  /// - The video: the one holding [startAt], or the one before when
+  ///   [startAt] is at its very start. A keyframe's time is a few frames
+  ///   past its fragment's (the pictures after it shown before it), a start
+  ///   at a whole second on the fragment's edge is before that, and the
+  ///   keyframe at or before the start is then the last one's. Which of the
+  ///   two cannot be told from the index: that close to the edge, the
+  ///   fragment before downloads too, as a window of its own.
+  /// - The audio: not the fragment holding [startAt]. mpv seeks the video
+  ///   first, then the audio to the time of the keyframe it found, up to a
+  ///   fragment of video earlier: the fragments from that time to
+  ///   [startAt], each a window of its own.
+  Future<bool> _warmAtStart(_Track track, Duration startAt) async {
     final head = track.head;
     final total = track.total;
-    if (head == null || total == null) return false;
-    final at = sidxFragmentAt(head, startAt);
-    if (at == null || at < head.length || at >= total) return false;
+    final isVideo = track.kind == 'video';
+    final index = head == null || total == null ? null : sidxIndex(head);
+    if (head == null || total == null || index == null) {
+      if (isVideo) _tellResumeKey(null);
+      return false;
+    }
+    final target = index.at(startAt);
+    final pieces = <RipperPiece>[];
+    RipperPiece fragment(int i) =>
+        RipperPiece(0, index.offsets[i], index.offsets[i] + index.sizes[i] - 1);
+    if (isVideo) {
+      final near = target > 0 && startAt - index.start(target) < _fragmentEdge;
+      // Told to the audio: the earliest keyframe the video may start on.
+      _tellResumeKey(index.start(near ? target - 1 : target));
+      if (near && index.sizes[target - 1] <= _edgeFragmentBytes) {
+        pieces.add(fragment(target - 1));
+      }
+    } else {
+      // The video's head comes in about when this one does.
+      final key = await _resumeKey?.future.timeout(
+        const Duration(milliseconds: 800),
+        onTimeout: () => null,
+      );
+      if (_closed || !identical(track.head, head)) return false;
+      var from = key == null ? target : min(target, index.at(key));
+      // On an edge of its own: a fragment more is a tenth of a megabyte.
+      if (from > 0 && (key ?? startAt) - index.start(from) < _fragmentEdge) {
+        from--;
+      }
+      for (var i = from; i < target; i++) {
+        pieces.add(fragment(i));
+      }
+    }
+    final at = index.offsets[target];
+    if (at < head.length || at >= total) return false;
+    // A fragment that begins in the head (the file's first) is not one a
+    // request starts at.
+    pieces.removeWhere((p) => p.start < head.length);
     onTrace?.call(
-      '${track.kind} 从 ${startAt.inSeconds} 秒开始：先下载字节 $at 起的窗口',
+      '${track.kind} 从 ${startAt.inSeconds} 秒开始：先下载字节 $at 起的窗口'
+      '${pieces.isEmpty ? '' : '，和前面 ${pieces.length} 个分片（字节 ${pieces.first.start} 起）'}',
     );
+    var from = at;
+    for (final first in const [true, false]) {
+      if (from >= total) break;
+      final size = windowBytes(kind: track.kind, first: first);
+      pieces.add(RipperPiece(0, from, min(total - 1, from + size - 1)));
+      from += size;
+    }
     track.warmForStart = true;
-    _warmWindows(
-      track,
-      windowBytes(kind: track.kind, first: true) +
-          windowBytes(kind: track.kind, first: false),
-      at: at,
-    );
+    _warmPieces(track, pieces);
     return true;
   }
 
-  /// The next window downloaded ahead, if it is [piece]. Any other start
-  /// (mpv asked elsewhere) leaves none: they are for one run from the head.
-  /// Windows at a start away from the beginning ([_warmAtStart]) outlast
-  /// the reads before them (the head, read first).
-  _Window? _takeWarm(_Track track, RipperPiece piece) {
-    if (track.warm.isEmpty) return null;
-    final window = track.warm.first;
-    if (!window.failed &&
-        window.piece.start == piece.start &&
-        window.piece.end == piece.end) {
-      track.warm.removeAt(0);
-      return window;
+  /// How close past a fragment's start a time is taken to be on its edge.
+  static const _fragmentEdge = Duration(milliseconds: 250);
+
+  /// The longest fragment downloaded on the chance that the video starts on
+  /// the one before ([_warmAtStart]).
+  static const _edgeFragmentBytes = 8 * 1024 * 1024;
+
+  /// The time of the keyframe a resumed video starts on, for its audio
+  /// ([_warmAtStart]); null if the video's index did not say.
+  Completer<Duration?>? _resumeKey;
+
+  void _tellResumeKey(Duration? time) {
+    final key = _resumeKey;
+    if (key != null && !key.isCompleted) key.complete(time);
+  }
+
+  /// The window downloaded ahead that starts at [start] (and ends by
+  /// [end]), if there is one. Any other start (mpv asked elsewhere) leaves
+  /// none: they are for one run from the head. Windows at a start away from
+  /// the beginning ([_warmAtStart]) outlast the reads before them (the
+  /// head, read first), and those before [start] are let go: mpv began at a
+  /// later one of them.
+  _Window? _takeWarm(_Track track, int start, int end) {
+    final warm = track.warm;
+    if (warm.isEmpty) return null;
+    if (track.warmForStart) {
+      if (start < warm.first.piece.start) return null;
+      while (warm.isNotEmpty && warm.first.piece.start < start) {
+        warm.removeAt(0);
+      }
+      if (warm.isEmpty) return null;
     }
-    if (track.warmForStart && piece.start < window.piece.start) return null;
-    track.warm.clear();
+    final window = warm.first;
+    if (!window.failed &&
+        window.piece.start == start &&
+        window.piece.end <= end) {
+      return warm.removeAt(0);
+    }
+    warm.clear();
     return null;
   }
 
@@ -702,18 +801,25 @@ class BtrRangeProxy {
         }
         // One window ahead: it downloads while mpv takes the current one,
         // queued behind it for connections (a lower priority).
+        // Short of a window downloaded ahead that starts inside it (mpv
+        // began a fragment before the one expected): the next is that one.
         RipperPiece windowAt(int from, {required bool first}) {
           final size = windowBytes(kind: track.kind, first: first);
-          return RipperPiece(0, from, min(end, from + size - 1));
+          var last = min(end, from + size - 1);
+          if (track.warmForStart && track.warm.isNotEmpty) {
+            final ahead = track.warm.first.piece.start;
+            if (ahead > from && ahead <= last) last = ahead - 1;
+          }
+          return RipperPiece(0, from, last);
         }
 
         final ahead = ListQueue<_Window>();
         if (cursor <= end) {
-          final window = windowAt(cursor, first: true);
-          if (_takeWarm(track, window) case final warm?) {
+          if (_takeWarm(track, cursor, end) case final warm?) {
             onTrace?.call('${track.kind} 用提前下好的窗口');
             ahead.add(warm);
           } else {
+            final window = windowAt(cursor, first: true);
             ahead.add(
               _window(
                 track,
@@ -739,18 +845,22 @@ class BtrRangeProxy {
           // picture needs while the head is on its way.
           await current.scheduled;
           while (ahead.length < depth && nextAt <= end && !job.signal.aborted) {
+            if (_takeWarm(track, nextAt, end) case final warm?) {
+              nextAt = warm.piece.end + 1;
+              ahead.add(warm);
+              continue;
+            }
             final window = windowAt(nextAt, first: false);
             nextAt = window.end + 1;
             // Each further one behind the one before for connections.
             ahead.add(
-              _takeWarm(track, window) ??
-                  _window(
-                    track,
-                    window,
-                    job.signal,
-                    startup: false,
-                    priority: _aheadPriority - 6 * ahead.length,
-                  ),
+              _window(
+                track,
+                window,
+                job.signal,
+                startup: false,
+                priority: _aheadPriority - 6 * ahead.length,
+              ),
             );
           }
           try {
