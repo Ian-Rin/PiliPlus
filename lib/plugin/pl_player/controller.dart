@@ -2849,6 +2849,114 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     }
   }
 
+  /// mpv decodes every frame and leaves the late ones out at the output
+  /// (framedrop=vo, its default). A long press at 3x of a 4K video of 60
+  /// frames a second asks the decoder for 180 a second, more than it gives:
+  /// a log showed the picture 0.8 s behind the sound and two frames of three
+  /// left out, with 15 to 45 s in the cache. Once every frame is late mpv
+  /// shows some ten a second.
+  /// Above normal speed the decoder may also skip the frames that no other
+  /// frame is built from (framedrop=decoder+vo: ffmpeg's skip_frame=nonref,
+  /// which leaves them out before the hardware decoder is asked, as an exact
+  /// seek does on its way to its target), and only while the picture is
+  /// behind (by more than 10 ms and a frame). At normal speed nothing
+  /// changes.
+  /// ffmpeg does this for H.264 and HEVC. Its AV1 decoder skips nothing
+  /// short of every frame but the keyframes, so an AV1 video gains nothing
+  /// here; [_pressEnded] says which the video was.
+  void _framedropForSpeed(Player player, double speed) {
+    try {
+      player.setProperty('framedrop', speed > 1 ? 'decoder+vo' : 'vo');
+    } catch (_) {}
+  }
+
+  static double? _mpvNumber(Player player, String name) {
+    try {
+      return double.tryParse(player.getProperty(name));
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// What a long press began with, for [_pressEnded].
+  ({
+    DateTime at,
+    Duration position,
+    double shownLate,
+    double skipped,
+    double rate,
+  })?
+  _press;
+
+  void _pressBegan(Player player, double rate) {
+    if (!longPressStatus.value) return;
+    _press = (
+      at: DateTime.now(),
+      position: player.state.position,
+      shownLate: _mpvNumber(player, 'frame-drop-count') ?? 0,
+      skipped: _mpvNumber(player, 'decoder-frame-drop-count') ?? 0,
+      rate: rate,
+    );
+  }
+
+  DateTime _lastPressLog = DateTime(0);
+
+  /// A long press that the picture did not keep up with, logged as it ends
+  /// (once a minute at most): the frames a second it asked for, how many
+  /// were shown, and how far the picture was behind the sound. One that kept
+  /// up only because the decoder skipped frames is logged too, every ten
+  /// minutes at most: it tells that the skipping works, and how much of the
+  /// video it can skip. A wait for the download has its own entry
+  /// ([_traceFastStall]); this one is the decoder's and the output's.
+  void _pressEnded(Player player) {
+    final press = _press;
+    _press = null;
+    if (press == null) return;
+    final held = DateTime.now().difference(press.at).inMilliseconds / 1000;
+    if (held < 1) return;
+    final fps = _mpvNumber(player, 'container-fps') ?? 0;
+    final played =
+        (player.state.position - press.position).inMilliseconds / 1000;
+    final late =
+        (_mpvNumber(player, 'frame-drop-count') ?? 0) - press.shownLate;
+    final skipped =
+        (_mpvNumber(player, 'decoder-frame-drop-count') ?? 0) - press.skipped;
+    // A seek during the press starts mpv's counts again.
+    if (fps <= 0 || played <= 0 || late < 0 || skipped < 0) return;
+    final behind = _mpvNumber(player, 'avsync') ?? 0;
+    final asked = played * fps / held;
+    final shown = (played * fps - late - skipped) / held;
+    final keptUp = behind.abs() < 0.2 && (shown >= 20 || asked < 30);
+    if (keptUp && skipped == 0) return;
+    final now = DateTime.now();
+    if (now.difference(_lastPressLog) < Duration(minutes: keptUp ? 10 : 1)) {
+      return;
+    }
+    _lastPressLog = now;
+    String read(String name) {
+      try {
+        final value = player.getProperty(name);
+        return value.isEmpty ? '-' : value;
+      } catch (_) {
+        return '?';
+      }
+    }
+
+    Utils.reportError(
+      '[长按倍速] ${keptUp ? '跟上了' : '没跟上'} '
+      '${press.rate}x 按了 ${held.toStringAsFixed(1)}s，'
+      '${read('video-params/w')}x${read('video-params/h')} '
+      '${fps.toStringAsFixed(0)}fps ${read('video-format')}'
+      '（每秒要 ${asked.toStringAsFixed(0)} 帧），'
+      '每秒显示 ${shown.toStringAsFixed(0)} 帧，'
+      '输出丢 ${late.toStringAsFixed(0)} 帧、'
+      '解码跳过 ${skipped.toStringAsFixed(0)} 帧，'
+      '画面落后声音 ${behind.toStringAsFixed(2)}s，'
+      '解码器 ${read('hwdec-current')}，'
+      '缓存还有 ${_seconds(player.state.buffer - player.state.position)}',
+    );
+  }
+
   DateTime _lastFastStall = DateTime(0);
 
   /// A wait for data above normal speed, logged (once a minute at most) with
@@ -2888,6 +2996,9 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
 
     await _videoPlayerController?.setRate(speed);
     _cacheForSpeed(speed);
+    if (_videoPlayerController case final player?) {
+      _framedropForSpeed(player, speed);
+    }
     if (!isLive) _playbackSpeed.value = speed;
     _updatePlaybackState();
     if (danmakuController != null) {
@@ -3109,13 +3220,18 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
       if (playerStatus.isPlaying) {
         longPressStatus.value = val;
         HapticFeedback.lightImpact();
-        await setPlaybackSpeed(
-          enableAutoLongPressSpeed ? playbackSpeed * 2 : longPressSpeed,
-        );
+        final speed = enableAutoLongPressSpeed
+            ? playbackSpeed * 2
+            : longPressSpeed;
+        await setPlaybackSpeed(speed);
+        if (_videoPlayerController case final player?) {
+          _pressBegan(player, speed);
+        }
       }
     } else {
       // if (kDebugMode) debugPrint('$playbackSpeed');
       longPressStatus.value = val;
+      if (_videoPlayerController case final player?) _pressEnded(player);
       await setPlaybackSpeed(lastPlaybackSpeed);
     }
   }
