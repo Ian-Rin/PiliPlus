@@ -1787,9 +1787,16 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     final Map<String, String> extras = {
       if (dataSource is FileSource)
         'cache': 'no'
-      else if (isLive)
-        ...liveBuffer
-      else
+      else if (isLive) ...{
+        ...liveBuffer,
+        // ffmpeg reads a stream on until it knows every track's parameters,
+        // for up to 5 s of it by default, and a live FLV stream (no header
+        // that says them) takes most of that: logs showed ten live starts
+        // of 2.5 to 6.3 s, all of it before the first picture's data was
+        // let through. A second of the stream holds both tracks' first
+        // packets; one that shows up later is added as it comes.
+        'demuxer-lavf-analyzeduration': '1',
+      } else
         // Per video: its bitrate sizes the cache.
         ...Pref.initBuffer(
           _playbackSpeed.value,
@@ -1822,6 +1829,12 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     };
 
     final generation = ++_ripperGeneration;
+    // The proxy of the video before is closed here, before mpv is given the
+    // new file, so that it stops downloading at once. mpv is still reading
+    // from it until then, and says so ("Stream ends prematurely", then
+    // "Connection refused" as ffmpeg tries again): a log entry at every
+    // switch that told nothing.
+    if (_ripperProxy != null) _droppingOldStream = true;
     _ripperProxy?.close();
     _ripperProxy = null;
     String video = dataSource.videoSource;
@@ -1926,9 +1939,15 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
       ),
       play: false,
     );
+    // mpv has let go of the file before.
+    _droppingOldStream = false;
     // The old picture is hidden by the player from here on.
     stalePicture.value = false;
   }
+
+  /// From the old proxy's close to mpv taking the new file: what mpv says of
+  /// the old stream meanwhile is not logged ([_noteMpvError]).
+  bool _droppingOldStream = false;
 
   /// The player is kept from one video to the next, and so is what was set
   /// on it for the one before. A log showed the switch to the next video in
@@ -2583,6 +2602,16 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
           );
         }
       }),
+      // In a start's log: the stream is open and read as far as its tracks
+      // (the network and ffmpeg's look at the stream before, the decoder
+      // and the cache after), which a start without the proxy's notes (a
+      // live stream) did not tell apart.
+      stream.tracks.listen((Tracks tracks) {
+        // More than "auto" and "no".
+        if (tracks.video.length > 2 || tracks.audio.length > 2) {
+          _startup?.mark('流已打开，识别到音视频轨', once: 'tracks');
+        }
+      }),
       stream.duration.listen((Duration duration) {
         updateDuration(duration);
         _updateIOSPip();
@@ -2737,6 +2766,8 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
   void _noteMpvError(PlayerLog log) {
     if (_mpvErrorTexts.length >= 64) _mpvErrorTexts.clear();
     _mpvErrorTexts.add(log.text);
+    // The stream of the video before, cut off on purpose.
+    if (_droppingOldStream) return;
     final line =
         '${log.prefix}: '
         '${log.text.replaceAllMapped(_signedQuery, (m) => '${m[1]}?…')}';

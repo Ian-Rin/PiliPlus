@@ -100,6 +100,8 @@ class LiveRoomController extends GetxController {
   int get _liveTraceInterval =>
       _liveTraceResp?.interval ?? LiveTraceResp.kInterval;
 
+  static bool _noLiveBuvidLogged = false;
+
   Future<void> _initLiveTraceIfNeeded() async {
     if (isClosed || !isLoaded.value || !heartbeat.isLogin) return;
     try {
@@ -122,7 +124,12 @@ class LiveRoomController extends GetxController {
           ?.value;
       if (isClosed) return;
       if (liveBuvid == null) {
-        Utils.reportError('liveTrace: null liveBuvid');
+        // The account has no such cookie: the same at every room opened
+        // (a log entry each). Once a run says it.
+        if (!_noLiveBuvidLogged) {
+          _noLiveBuvidLogged = true;
+          Utils.reportError('liveTrace: null liveBuvid');
+        }
         return;
       }
 
