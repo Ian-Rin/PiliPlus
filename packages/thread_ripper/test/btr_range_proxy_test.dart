@@ -661,9 +661,15 @@ void main() {
       );
       final fast = await leads(register(['/good']), Duration.zero);
       final lead = fast.fold(0, (a, l) => max(a, l.$2));
-      // One window ahead kept it under two windows.
-      expect(lead, greaterThan(3 * 2 * 1024 * 1024));
+      // One window ahead kept it under two windows: 3.0 to 3.9 MiB over
+      // runs of this test with maxAheadWindows at 1, against 5.3 to 8.1 MiB
+      // as it is. Which of those it is depends on how the pieces in flight
+      // happen to finish, so the line is drawn between the two, not at the
+      // three windows it was (half the runs came to 5.3 MiB and failed).
+      expect(lead, greaterThan(2 * 2 * 1024 * 1024 + 512 * 1024));
     },
+    // It measures a race; a real fault fails every time.
+    retry: 2,
   );
 
   test('a reader slower than the download keeps one window ahead', () async {
