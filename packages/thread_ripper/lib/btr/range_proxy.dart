@@ -510,6 +510,56 @@ class BtrRangeProxy {
     return true;
   }
 
+  /// A seek outside mpv's cache: it asks the video from the fragment with
+  /// the keyframe before the target, reads that keyframe, and only then
+  /// seeks the audio, to the keyframe's time. Logs of such seeks showed the
+  /// audio's request half a second to a second after the video's, and its
+  /// first bytes half a second after that, the spinner waiting for them.
+  /// The video's request tells where the audio's will be (the fragment of
+  /// the video's index that [start] is in gives the time, the audio's index
+  /// the byte): its first windows download as the video's do.
+  void _warmAudioAtSeek(_Track video, int start) {
+    final fragments = video.index;
+    final fragment = fragments?.holding(start);
+    if (fragments == null || fragment == null) return;
+    final key = fragments.start(fragment);
+    for (final audio in _tracks.values) {
+      final index = audio.index;
+      final head = audio.head;
+      final total = audio.total;
+      if (audio.kind != 'audio' ||
+          index == null ||
+          head == null ||
+          total == null) {
+        continue;
+      }
+      final target = index.at(key);
+      final at = index.offsets[target];
+      if (at < head.length || at >= total) continue;
+      // There already: a start away from the beginning ([_warmAtStart]).
+      if (audio.warm.any((w) => !w.failed && w.piece.start == at)) continue;
+      final pieces = <RipperPiece>[];
+      // On an edge, the fragment before too (as in [_warmAtStart]).
+      if (target > 0 &&
+          key - index.start(target) < _fragmentEdge &&
+          index.offsets[target - 1] >= head.length) {
+        pieces.add(
+          RipperPiece(0, index.offsets[target - 1], at - 1),
+        );
+      }
+      var from = at;
+      for (final first in const [true, false]) {
+        if (from >= total) break;
+        final size = windowBytes(kind: audio.kind, first: first);
+        pieces.add(RipperPiece(0, from, min(total - 1, from + size - 1)));
+        from += size;
+      }
+      onTrace?.call('audio 随视频跳转：先下载字节 ${pieces.first.start} 起的窗口');
+      audio.warmForStart = true;
+      _warmPieces(audio, pieces);
+    }
+  }
+
   /// How close past a fragment's start a time is taken to be on its edge.
   static const _fragmentEdge = Duration(milliseconds: 250);
 
@@ -767,11 +817,11 @@ class BtrRangeProxy {
       } else {
         // mpv asks again only for bytes its cache lacks: upstream's seek
         // outside the buffer, a new start.
-        if (track.opened && start != track.warmEnd) {
-          autoConcurrency?.newSession();
-        }
+        final seeked = track.opened && start != track.warmEnd;
+        if (seeked) autoConcurrency?.newSession();
         track.opened = true;
         onTrace?.call('${track.kind} 请求 ${header ?? '整个文件'}');
+        if (seeked && track.kind == 'video') _warmAudioAtSeek(track, start);
         var traced = false;
         // Headers go out with the first bytes, so a request that fails before
         // any arrive is a 502, not a stream cut short.
@@ -995,6 +1045,18 @@ class _Track {
 
   /// [warm] is at a start away from the beginning, past the head.
   bool warmForStart = false;
+
+  /// The fragments of the file, from the index in [head]; null without a
+  /// head or a plain index in it.
+  SidxIndex? get index {
+    final head = this.head;
+    if (head == null || _indexRead) return _index;
+    _indexRead = true;
+    return _index = sidxIndex(head);
+  }
+
+  SidxIndex? _index;
+  bool _indexRead = false;
 }
 
 /// One window's bytes on their way to mpv: kept in order until [attach],

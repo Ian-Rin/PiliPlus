@@ -30,6 +30,16 @@ class SidxIndex {
 
   int get length => offsets.length;
 
+  /// The fragment holding the file's byte [offset]; null if none does (the
+  /// head, before the first).
+  int? holding(int offset) {
+    for (var i = 0; i < offsets.length; i++) {
+      if (offset < offsets[i]) return null;
+      if (offset < offsets[i] + sizes[i]) return i;
+    }
+    return null;
+  }
+
   /// The fragment holding [time]: the last starting at or before it (the
   /// first, for a time before them all).
   int at(Duration time) {

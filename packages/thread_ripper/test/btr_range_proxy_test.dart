@@ -801,6 +801,44 @@ void main() {
     expect((asked(second), asked(third)), before);
   });
 
+  // mpv seeks the video, reads its keyframe, and only then asks the audio
+  // from that keyframe's time: the video's request tells where, and the
+  // audio downloads there before it is asked for.
+  test('a seek of the video downloads the audio there too', () async {
+    proxy.close();
+    proxy = BtrRangeProxy(concurrency: 4, userAgent: 'test');
+    await proxy.start();
+    const fragment = 1000000;
+    final head = mp4Head(
+      [fragment - 100, 1500000, 1400000],
+      [5000, 5000, 5000],
+    );
+    final anchor = head.length;
+    source = Uint8List.fromList(List.generate(4000000, (i) => (i * 7) % 251));
+    source.setRange(0, head.length, head);
+    final second = anchor + fragment - 100;
+    final third = second + 1500000;
+    final notes = <String>[];
+    proxy.onTrace = notes.add;
+    final video = proxy.registerCandidates([endpoint('/good')]);
+    final audio = proxy.registerCandidates([endpoint('/good')], isAudio: true);
+    await Future<void>.delayed(const Duration(milliseconds: 300));
+    await fetch(video, range: 'bytes=0-1023');
+    expect(notes.where((n) => n.contains('随视频跳转')), isEmpty);
+    final seek = fetch(video, range: 'bytes=$third-');
+    await Future<void>.delayed(const Duration(milliseconds: 800));
+    // The third fragment's time is on the edge of the audio's (the same
+    // file here): the one before downloads too.
+    expect(notes, contains('audio 随视频跳转：先下载字节 $second 起的窗口'));
+    int asked(int at) => requests.where((r) => r.$2 == at).length;
+    final before = asked(third);
+    final result = await fetch(audio, range: 'bytes=$third-');
+    expect(result.$2, source.sublist(third));
+    expect(notes, contains('audio 用提前下好的窗口'));
+    expect(asked(third), before);
+    expect((await seek).$2, source.sublist(third));
+  });
+
   test('a request elsewhere leaves the windows downloaded ahead', () async {
     final url = proxy.registerCandidates([
       endpoint('/good'),
