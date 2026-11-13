@@ -3,7 +3,8 @@
 #   newer one cancels the run still waiting (see concurrency), so a run of
 #   pushes makes one build on a Mac, of the last. GitHub turned Actions off
 #   for this fork after days of ten Mac builds each. A run started by hand
-#   or by the daily sync builds at once.
+#   or by the daily sync builds at once, and so does a push whose last
+#   commit's message has "[build now]" in it.
 # - New code on main cancels the build still running for older code.
 # - A build that no Mac ever picked up (GitHub's Macs can be out of capacity
 #   for hours) is tried once more. One that failed on a Mac (the code) and one
@@ -51,9 +52,13 @@ jobs:
     outputs:
       build: ${{ steps.check.outputs.build }}
     steps:
-      # A newer push cancels this run while it waits.
+      # A newer push cancels this run while it waits. A push whose last
+      # commit says "[build now]" in its message is not made to wait: the
+      # one that is meant to be built, said by whoever pushes it.
       - name: Wait for more pushes
-        if: github.event_name == 'push'
+        if: >-
+          github.event_name == 'push'
+          && !contains(github.event.head_commit.message, '[build now]')
         run: sleep 900
 
       - name: Checkout code
