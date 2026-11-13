@@ -109,9 +109,14 @@ jobs:
   retry:
     name: Retry
     needs: [check, build]
-    # failure() is false for a build cancelled by newer code.
+    # A build no Mac picked up ends "cancelled", not "failure" ("The job was
+    # not acquired by Runner of type hosted even after multiple attempts"),
+    # and failure() was false for it: the retry was skipped the one time it
+    # was needed. cancelled() is the run's: true for a run that newer code
+    # cancelled, whose build ends "cancelled" too and is not tried again.
     if: >-
-      failure() && needs.check.outputs.build == 'true'
+      !cancelled() && needs.check.outputs.build == 'true'
+      && (needs.build.result == 'failure' || needs.build.result == 'cancelled')
       && needs.build.outputs.on-a-mac != 'true'
     runs-on: macos-26
     steps:
