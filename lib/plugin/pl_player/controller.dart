@@ -2878,6 +2878,41 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     }
   }
 
+  /// The most a long press asks the decoder for, in pixels a second: a 4K
+  /// video at 120 frames a second (and a little, for 59.94 and the like).
+  /// On an iPhone 17 Pro a 4K video of 60 frames a second was smooth at 2x
+  /// and not at 3x, whatever the decoder skipped (see [_framedropForSpeed]:
+  /// mpv starts skipping only once the output leaves frames out, and stops
+  /// as the picture catches up, so it comes and goes); 1080p at 180 frames
+  /// a second, a third of this, was smooth.
+  static const _pressPixelRate = 3840 * 2160 * 125;
+
+  /// The speed of a long press set to [set]: less, in steps of a quarter,
+  /// for a video the decoder cannot give that fast, and never less than the
+  /// speed playing now.
+  double _pressSpeed(Player player, double set) {
+    final width = _mpvNumber(player, 'video-params/w');
+    final height = _mpvNumber(player, 'video-params/h');
+    final fps = _mpvNumber(player, 'container-fps');
+    if (width == null || height == null || fps == null) return set;
+    final pixels = width * height * fps;
+    if (pixels <= 0) return set;
+    final most = _pressPixelRate / pixels;
+    if (most >= set) return set;
+    return max((most * 4).floor() / 4, min(set, player.state.rate));
+  }
+
+  /// The speed of the long press now or last, for its label.
+  final Rxn<double> _pressSpeedInForce = Rxn<double>();
+
+  /// What the long press's label says: the speed in force, which is less
+  /// than the one set for a video the decoder cannot give that fast.
+  double get pressSpeedShown =>
+      _pressSpeedInForce.value ??
+      (enableAutoLongPressSpeed
+          ? (longPressStatus.value ? lastPlaybackSpeed : playbackSpeed) * 2
+          : longPressSpeed);
+
   /// What a long press began with, for [_pressEnded].
   ({
     DateTime at,
@@ -2885,10 +2920,11 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     double shownLate,
     double skipped,
     double rate,
+    double set,
   })?
   _press;
 
-  void _pressBegan(Player player, double rate) {
+  void _pressBegan(Player player, double rate, double set) {
     if (!longPressStatus.value) return;
     _press = (
       at: DateTime.now(),
@@ -2896,6 +2932,7 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
       shownLate: _mpvNumber(player, 'frame-drop-count') ?? 0,
       skipped: _mpvNumber(player, 'decoder-frame-drop-count') ?? 0,
       rate: rate,
+      set: set,
     );
   }
 
@@ -2944,7 +2981,9 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
 
     Utils.reportError(
       '[长按倍速] ${keptUp ? '跟上了' : '没跟上'} '
-      '${press.rate}x 按了 ${held.toStringAsFixed(1)}s，'
+      '${press.rate}x'
+      '${press.set == press.rate ? '' : '（设的 ${press.set}x，按解码能力降速）'} '
+      '按了 ${held.toStringAsFixed(1)}s，'
       '${read('video-params/w')}x${read('video-params/h')} '
       '${fps.toStringAsFixed(0)}fps ${read('video-format')}'
       '（每秒要 ${asked.toStringAsFixed(0)} 帧），'
@@ -3218,14 +3257,18 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     }
     if (val) {
       if (playerStatus.isPlaying) {
-        longPressStatus.value = val;
-        HapticFeedback.lightImpact();
-        final speed = enableAutoLongPressSpeed
+        final set = enableAutoLongPressSpeed
             ? playbackSpeed * 2
             : longPressSpeed;
+        final player = _videoPlayerController;
+        final speed = player == null ? set : _pressSpeed(player, set);
+        // Before the status: the label is built as that changes.
+        _pressSpeedInForce.value = speed;
+        longPressStatus.value = val;
+        HapticFeedback.lightImpact();
         await setPlaybackSpeed(speed);
-        if (_videoPlayerController case final player?) {
-          _pressBegan(player, speed);
+        if (player != null && player == _videoPlayerController) {
+          _pressBegan(player, speed, set);
         }
       }
     } else {
