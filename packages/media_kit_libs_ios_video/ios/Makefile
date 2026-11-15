@@ -4,14 +4,22 @@ all: Frameworks/*.xcframework Frameworks/.symlinks
 # is media_kit_libs_ios_video of the media-kit fork the app uses, copied
 # here to name these three.
 #
-# This is the archive that fork names (mpv 0.39.0, ffmpeg 7.0.2), from a
-# build repository left alone since 2024. media-kit's own
-# (media-kit/libmpv-darwin-build v0.7.3: mpv 0.36.0, ffmpeg 6.0) was
-# tried: on an iPhone 17 Pro it stuttered every few seconds in plain
-# playback, sound and picture, and at each change of speed.
-MPV_XCFRAMEWORKS_REPO=gungun974/melodink-libmpv-darwin-build
-MPV_XCFRAMEWORKS_VERSION=v0.39.0
-MPV_XCFRAMEWORKS_SHA256SUM=d7a996b2afad622e9bafb53f1f988235938af33fe162840c9c74a1894bde4bfc
+# The fork names gungun974/melodink-libmpv-darwin-build v0.39.0 (mpv
+# 0.39.0, ffmpeg 7.0.2; sha256
+# d7a996b2afad622e9bafb53f1f988235938af33fe162840c9c74a1894bde4bfc), a
+# build repository left alone since 2024. This is the same build (the
+# branch mpv-0.39 of Ian-Rin/libmpv-darwin-build: the same versions,
+# options and files) with one patch of ffmpeg's more,
+# patches/ffmpeg-videotoolbox-async.patch: a frame is given to
+# VideoToolbox without waiting for the picture of the one before, which
+# held 4K decoding to some 125 frames a second.
+#
+# media-kit's own build (v0.7.3: mpv 0.36.0, ffmpeg 6.0) was tried and
+# stuttered on an iPhone 17 Pro: every few seconds in plain playback,
+# sound and picture, and at each change of speed.
+MPV_XCFRAMEWORKS_REPO=Ian-Rin/libmpv-darwin-build
+MPV_XCFRAMEWORKS_VERSION=v0.39.0-async1
+MPV_XCFRAMEWORKS_SHA256SUM=0d328cbb83c3a8783c5ca60bddd2b066c8310887c5e46b7142c19ce1a47ba426
 
 .cache/xcframeworks/libmpv-xcframeworks-${MPV_XCFRAMEWORKS_VERSION}-ios-universal.tar.gz:
 	mkdir -p .cache/xcframeworks

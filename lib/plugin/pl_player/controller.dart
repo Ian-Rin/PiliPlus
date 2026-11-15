@@ -2952,7 +2952,15 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
   /// mpv starts skipping only once the output leaves frames out, and stops
   /// as the picture catches up, so it comes and goes); 1080p at 180 frames
   /// a second, a third of this, was smooth.
-  static const _pressPixelRate = 3840 * 2160 * 125;
+  ///
+  /// That was ffmpeg waiting for each frame's picture before it gave
+  /// VideoToolbox the next (some 125 frames a second of 4K). The library is
+  /// now built with ffmpeg patched not to wait (see
+  /// packages/media_kit_libs_ios_video/ios/Makefile), and the limit is set
+  /// past 3x of such a video to see what that gives: a press the picture
+  /// does not keep up with is logged ([_pressEnded]). To be set by what
+  /// those logs say.
+  static const _pressPixelRate = 3840 * 2160 * 190;
 
   /// The speed of a long press set to [set]: less, in steps of a quarter,
   /// for a video the decoder cannot give that fast, and never less than the
