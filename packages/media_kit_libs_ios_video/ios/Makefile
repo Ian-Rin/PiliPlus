@@ -2,13 +2,16 @@ all: Frameworks/*.xcframework Frameworks/.symlinks
 
 # Where the archive comes from, its release and its sha256. This package
 # is media_kit_libs_ios_video of the media-kit fork the app uses, copied
-# here to name these three: the fork's point at a build repository left
-# alone since 2024 (gungun974/melodink-libmpv-darwin-build, mpv 0.39.0,
-# ffmpeg 7.0.2), which no longer builds on GitHub's Macs as it is. This
-# is media-kit's own (mpv 0.36.0, ffmpeg 6.0), built to this day.
-MPV_XCFRAMEWORKS_REPO=media-kit/libmpv-darwin-build
-MPV_XCFRAMEWORKS_VERSION=v0.7.3
-MPV_XCFRAMEWORKS_SHA256SUM=28b528c872ca0886f1a29e8c82eb25a89c0ba86c094f2bd013b4416ad3fceba8
+# here to name these three.
+#
+# This is the archive that fork names (mpv 0.39.0, ffmpeg 7.0.2), from a
+# build repository left alone since 2024. media-kit's own
+# (media-kit/libmpv-darwin-build v0.7.3: mpv 0.36.0, ffmpeg 6.0) was
+# tried: on an iPhone 17 Pro it stuttered every few seconds in plain
+# playback, sound and picture, and at each change of speed.
+MPV_XCFRAMEWORKS_REPO=gungun974/melodink-libmpv-darwin-build
+MPV_XCFRAMEWORKS_VERSION=v0.39.0
+MPV_XCFRAMEWORKS_SHA256SUM=d7a996b2afad622e9bafb53f1f988235938af33fe162840c9c74a1894bde4bfc
 
 .cache/xcframeworks/libmpv-xcframeworks-${MPV_XCFRAMEWORKS_VERSION}-ios-universal.tar.gz:
 	mkdir -p .cache/xcframeworks
