@@ -203,11 +203,10 @@ dependency_overrides:
       url: https://github.com/My-Responsitories/media-kit.git
       path: libs/android/media_kit_libs_android_video
       ref: native
+  # The media-kit fork's package, copied into this repository for the
+  # archive it downloads (see its ios/Makefile).
   media_kit_libs_ios_video:
-    git:
-      url: https://github.com/My-Responsitories/media-kit.git
-      path: libs/ios/media_kit_libs_ios_video
-      ref: native
+    path: packages/media_kit_libs_ios_video
   media_kit_libs_video:
     git:
       url: https://github.com/My-Responsitories/media-kit.git
