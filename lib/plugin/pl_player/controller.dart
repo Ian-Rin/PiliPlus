@@ -2962,7 +2962,10 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     final asked = played * fps / held;
     final shown = (played * fps - late - skipped) / held;
     final keptUp = behind.abs() < 0.2 && (shown >= 20 || asked < 30);
-    if (keptUp && skipped == 0) return;
+    // A few frames are skipped in any press (1080p at 3x: one to six of
+    // some thousand, an entry each time); a tenth of them is the decoder
+    // being helped.
+    if (keptUp && skipped < played * fps / 10) return;
     final now = DateTime.now();
     if (now.difference(_lastPressLog) < Duration(minutes: keptUp ? 10 : 1)) {
       return;
@@ -3004,6 +3007,11 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     if (rate <= 1.1 || isLive) return;
     final now = DateTime.now();
     if (now.difference(_lastFastStall) < const Duration(minutes: 1)) return;
+    // With seconds in the cache it is not the download that is waited for:
+    // the hardware decoder being built again seeks, and the logs held an
+    // entry here (20 to 56 s in the cache) beside each of those.
+    final cached = _mpvNumber(player, 'demuxer-cache-duration');
+    if (cached != null && cached >= 3) return;
     _lastFastStall = now;
     String read(String name) {
       try {
