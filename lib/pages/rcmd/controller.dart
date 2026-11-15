@@ -71,20 +71,44 @@ class RcmdController extends CommonListController with RefreshImplMixin {
     }
   }
 
+  /// The saved list's end was reached while [_fetchBehind] was on its way.
+  /// The list asks for more as its last item is built, once: the saved list
+  /// is some ten items, its last one is built with the first frame, the
+  /// request was dropped for the one on its way, and nothing asked again.
+  /// Scrolling down showed the saved list and no more, until the app was
+  /// started again.
+  bool _behind = false;
+  bool _moreAsked = false;
+
+  @override
+  Future<void> onLoadMore() {
+    if (_behind) {
+      _moreAsked = true;
+      return Future.value();
+    }
+    return super.onLoadMore();
+  }
+
   Future<void> _fetchBehind() async {
     // A scroll to the saved list's end waits for this (no second page 0).
     isLoading = true;
+    _behind = true;
     final LoadingState res;
     try {
       res = await customGetData();
     } finally {
       isLoading = false;
+      _behind = false;
       // Even on a failure: what comes next is added below the saved list,
       // and page 0 would put the saved list in a second time (see
       // [handleListResponse]).
       page = 1;
     }
     if (isClosed) return;
+    if (_moreAsked) {
+      _moreAsked = false;
+      onLoadMore();
+    }
     if (res case Success(:final List response) when response.isNotEmpty) {
       _pending = response;
       newCount.value = response.length;
@@ -215,13 +239,41 @@ class RcmdController extends CommonListController with RefreshImplMixin {
           if (savedRcmdTip) {
             lastRefreshAt = dataList.length;
           }
-          if (response.length > 200) {
-            dataList.addAll(response.take(50));
-          } else {
-            dataList.addAll(response);
-          }
+          _append(
+            dataList,
+            response.length > 200 ? response.take(50) : response,
+          );
         }
       }
+    }
+  }
+
+  /// A list from a request is typed by its items at run time (a
+  /// `List<RcmdVideoItemAppModel>`), and the one [showNew] puts together is
+  /// a `List<dynamic>`: addAll of the second into the first throws, whatever is
+  /// in it. That was the refresh after the new recommendations had been
+  /// shown, and it left [isLoading] set: no refresh and no further page
+  /// until the app was started again. One by one, each item is checked for
+  /// itself; those of another source (changed in the settings) are left out.
+  static void _append(List<dynamic> to, Iterable<dynamic> items) {
+    try {
+      for (final item in items) {
+        to.add(item);
+      }
+    } on TypeError {
+      // Another source's items.
+    }
+  }
+
+  /// An error on the way (a response not as expected) must not leave the
+  /// page loading for good: nothing is asked for while [isLoading] is set.
+  @override
+  Future<void> queryData([bool isRefresh = true]) async {
+    try {
+      await super.queryData(isRefresh);
+    } catch (_) {
+      isLoading = false;
+      rethrow;
     }
   }
 
