@@ -153,12 +153,38 @@ class _BackgroundTrace {
   void mark(String note, {bool notable = false}) {
     if (notable) this.notable = true;
     if (done || _notes.length >= 40) return;
-    _notes.add(
-      '${(_clock.elapsedMilliseconds / 1000).toStringAsFixed(1)}s $note',
-    );
+    _notes.add('${_now}s $note');
   }
 
-  String get report => '[$kind]\n${_notes.join('\n')}';
+  String get _now => (_clock.elapsedMilliseconds / 1000).toStringAsFixed(1);
+
+  /// How often each of mpv's messages came, and when it last did.
+  final _mpvSeen = <String, (int, String)>{};
+
+  /// A warning or an error of mpv's: a note the first time, counted after
+  /// that. A trip's fifteen notes went to four messages, each a few times
+  /// over, in the tenth of a second after leaving, and none was left for
+  /// what mpv said once back, where the picture stood still for seconds.
+  void mpv(String line) {
+    notable = true;
+    if (done) return;
+    final seen = _mpvSeen[line];
+    if (seen != null) {
+      _mpvSeen[line] = (seen.$1 + 1, _now);
+      return;
+    }
+    if (warnings >= 15) return;
+    warnings++;
+    _mpvSeen[line] = (1, _now);
+    mark(line);
+  }
+
+  String get report => [
+    '[$kind]',
+    ..._notes,
+    for (final MapEntry(key: line, value: (times, last)) in _mpvSeen.entries)
+      if (times > 1) '又 ${times - 1} 次，最后在 ${last}s：$line',
+  ].join('\n');
 }
 
 class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
@@ -745,8 +771,8 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
           hw != 'no' &&
           !onlyPlayAudio.value &&
           !identical(_videoOffFor, player) &&
-          _decoderNow(player) == 'no') {
-        trace.mark('结束时仍是软件解码', notable: true);
+          _fellBack(player, hw)) {
+        trace.mark('结束时解码器仍是 ${_decoderNow(player)}', notable: true);
       }
       trace.done = true;
       if (trace.notable) Utils.reportError(trace.report);
@@ -962,8 +988,11 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
       // stream is opened again instead, which starts on a keyframe with a
       // decoder of its own; only where the decoder did fall back, as that
       // costs a second or two of spinner.
-      if (_decoderNow(player) != 'no' || !player.state.playing) return;
-      _bgTrace?.mark('直播不能跳转：重新打开直播流，用新的硬件解码器');
+      if (!_fellBack(player, hw) || !player.state.playing) return;
+      _bgTrace?.mark(
+        '直播不能跳转：重新打开直播流，用新的硬件解码器'
+        '（解码器 ${_decoderNow(player)}）',
+      );
       refreshPlayer();
       return;
     }
@@ -1075,7 +1104,8 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
       return;
     }
     // '' with the video track off: nothing to rebuild.
-    if (_decoderNow(player) != 'no') return;
+    if (!_fellBack(player, hw)) return;
+    final decoder = _decoderNow(player);
     var trace = _bgTrace;
     if (trace == null || trace.done) {
       // Not around a trip already logged: a log of its own.
@@ -1085,7 +1115,7 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
       _sampleLater(player, const Duration(seconds: 3), '3 秒后');
       _reportBackgroundLater(const Duration(seconds: 4));
     } else {
-      trace.mark('$why（解码器 no）', notable: true);
+      trace.mark('$why（解码器 $decoder）', notable: true);
       // A trip under two seconds plans no report of its own; the earliest
       // planned one goes, the later ones find it done.
       _sampleLater(player, const Duration(seconds: 2), '重建后 2 秒');
@@ -1096,7 +1126,7 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
       (at) => now.difference(at) > const Duration(minutes: 1),
     );
     if (_hwRebuilds.length >= 3) {
-      trace.mark('一分钟内已重建 3 次，不再重建，留在软件解码');
+      trace.mark('一分钟内已重建 3 次，不再重建，留在 $decoder');
       return;
     }
     _hwRebuilds.add(now);
@@ -1109,6 +1139,24 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     } catch (_) {
       return '?';
     }
+  }
+
+  /// Whether mpv has left the decoder asked for ([hw], the setting) for the
+  /// one it tries next: the software decoder ("no"), or before that the
+  /// copy mode of the hardware one ("videotoolbox-copy": decoded by the
+  /// hardware, then copied out of it picture by picture).
+  ///
+  /// Only "no" was looked for while mpv gave a decoder up after three
+  /// failed frames: the copy mode failed its three as fast, in the
+  /// background, and software it was. With thirty let pass
+  /// (vd-lavc-software-fallback, for the frames a rebuilt decoder is given
+  /// from the middle of a group) a trip of two seconds was over before the
+  /// copy mode had failed thirty, and back in the foreground it works: a
+  /// log showed a live stream stay on it, its picture still for two seconds
+  /// and more after the return, with nothing done about it.
+  static bool _fellBack(Player player, String hw) {
+    final now = _decoderNow(player);
+    return now == 'no' || (now.endsWith('-copy') && !hw.endsWith('-copy'));
   }
 
   /// The player whose video track [_videoOff] turned off.
@@ -2715,15 +2763,10 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
             _onHwDecodeFailed(player);
           }
           final trace = _bgTrace;
-          if (log.level == 'warn' &&
-              trace != null &&
-              !trace.done &&
-              trace.warnings < 15) {
-            trace.warnings++;
-            trace.mark(
+          if (log.level == 'warn' && trace != null && !trace.done) {
+            trace.mpv(
               'mpv 警告 ${log.prefix}: '
               '${log.text.replaceAllMapped(_signedQuery, (m) => '${m[1]}?…')}',
-              notable: true,
             );
           }
           if (kDebugMode) debugPrint(log.toString());
@@ -2831,12 +2874,7 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
         '${log.text.replaceAllMapped(_signedQuery, (m) => '${m[1]}?…')}';
     final trace = _bgTrace;
     if (trace != null && !trace.done) {
-      if (trace.warnings < 15) {
-        trace.warnings++;
-        trace.mark('mpv 报错 $line', notable: true);
-      } else {
-        trace.notable = true;
-      }
+      trace.mpv('mpv 报错 $line');
       return;
     }
     final kind = line.replaceAll(_digits, 'N');
