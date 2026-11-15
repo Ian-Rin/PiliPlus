@@ -92,7 +92,9 @@ class VideoCardV extends StatelessWidget {
       children: [
         Card(
           child: InkWell(
-            onTapDown: (_) {
+            // At the tap, not the press: a press that became a scroll or a
+            // long press asked for an address no one took.
+            onTap: () {
               if (videoItem.goto == 'av') {
                 PlayUrlPrefetch.start(
                   bvid:
@@ -103,8 +105,8 @@ class VideoCardV extends StatelessWidget {
                   cid: videoItem.cid,
                 );
               }
+              onPushDetail();
             },
-            onTap: onPushDetail,
             onLongPress: onLongPress,
             onSecondaryTap: PlatformUtils.isMobile ? null : onLongPress,
             borderRadius: const .all(.circular(12)),

@@ -81,13 +81,21 @@ class NoDelayConnectionManager implements ConnectionManager {
     // Plain http: HTTP/1.1, through the adapter's fallback.
     if (uri.scheme != 'https') throw DioH2NotSupportedException(uri, null);
     final timeout = options.connectTimeout;
-    final socket = await SecureSocket.connect(
+    final connecting = SecureSocket.connect(
       uri.host,
       uri.port,
       timeout: timeout != null && timeout > Duration.zero ? timeout : null,
       onBadCertificate: onBadCertificate,
       supportedProtocols: const ['h2'],
-    ).timeout(handshakeTimeout);
+    );
+    final SecureSocket socket;
+    try {
+      socket = await connecting.timeout(handshakeTimeout);
+    } on TimeoutException {
+      // The handshake may still end: its socket is closed, not left open.
+      connecting.then((late) => late.destroy()).ignore();
+      rethrow;
+    }
     if (socket.selectedProtocol != 'h2') {
       socket.destroy();
       throw DioH2NotSupportedException(uri, socket.selectedProtocol);

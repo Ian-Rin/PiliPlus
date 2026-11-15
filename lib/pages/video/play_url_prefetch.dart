@@ -10,14 +10,14 @@ import 'package:PiliPlus/plugin/pl_player/controller.dart';
 import 'package:PiliPlus/utils/accounts.dart';
 import 'package:PiliPlus/utils/storage_pref.dart';
 
-/// A video's play address asked for as its card is pressed, before the
-/// finger lifts: the press, the page's opening animation and the page's
-/// setup take a few hundred milliseconds, which the address request (the
-/// first wait of every start) now spends on its way. The video page takes
-/// it ([take]) when it asks for the same video with the same parameters.
+/// A video's play address asked for as its card is tapped: the page's
+/// opening and setup take a few hundred milliseconds, which the address
+/// request (the first wait of every start) now spends on its way. The
+/// video page takes it ([take]) when it asks for the same video with the
+/// same parameters.
 ///
-/// One at a time: a press elsewhere (a scroll that stopped on a card) puts
-/// in its own, and a press not followed by a tap costs one request.
+/// At the tap, not the press before it: a press that became a scroll or a
+/// long press had asked for an address no one took, one request each.
 abstract final class PlayUrlPrefetch {
   static ({
     String bvid,

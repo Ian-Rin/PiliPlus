@@ -30,6 +30,10 @@ class HistorySearchController
   @override
   String get wordsKey => 'historySearchWords';
 
+  @override
+  Object? quietKey(HistoryItemModel item) =>
+      '${item.history.business}_${item.kid}';
+
   Future<void> onDelHistory(int index, kid, String business) async {
     final res = await UserHttp.delHistory(
       '${business}_$kid',

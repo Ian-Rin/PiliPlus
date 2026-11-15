@@ -23,6 +23,10 @@ abstract class CommonListController<R, T> extends CommonController<R, T> {
   @override
   Future<void> queryData([bool isRefresh = true]) async {
     if (isLoading || (!isRefresh && isEnd)) return;
+    // A quiet refresh that failed left the list as it was and the paging
+    // at its start (a subclass's cursor too): more is then asked for as a
+    // refresh, or the first page would be added a second time.
+    if (!isRefresh && _quietFailed) isRefresh = true;
     isLoading = true;
     final LoadingState<R> res = await customGetData();
     if (res case Success(:final response)) {
@@ -49,7 +53,9 @@ abstract class CommonListController<R, T> extends CommonController<R, T> {
         }
       }
       page++;
+      _quietFailed = false;
     } else {
+      if (isRefresh && _quiet) _quietFailed = true;
       if (isRefresh &&
           !_quiet &&
           !handleError(res is Error ? res.errMsg : null)) {
@@ -67,10 +73,59 @@ abstract class CommonListController<R, T> extends CommonController<R, T> {
   }
 
   bool _quiet = false;
+  bool _quietFailed = false;
+
+  /// What makes an item the same one in a list fetched again: with it,
+  /// [refreshQuietly] can put a fresh first page into a list of more pages.
+  /// Null (the default): such a list is not refreshed.
+  Object? quietKey(T item) => null;
+
+  /// The first page's request, the paging left as it is. A subclass with
+  /// a cursor of its own puts that aside as well.
+  Future<LoadingState<R>> firstPageAgain() {
+    final at = page;
+    page = 1;
+    try {
+      return customGetData();
+    } finally {
+      page = at;
+    }
+  }
 
   /// A refresh the user did not ask for (the page shown again): the list
   /// is replaced in place, and a failure leaves it as it was.
+  ///
+  /// With more pages loaded, replacing the list would leave the first one
+  /// only, and the view would jump away from where it was scrolled to. The
+  /// first page is then fetched and put in front, its items taken out of
+  /// the rest: what changed (a video just watched, now first) is there, and
+  /// the pages below, their place and the paging stay.
   Future<void> refreshQuietly() async {
+    final shown = loadingState.value.dataOrNull;
+    if (page > 2 && shown != null && shown.isNotEmpty) {
+      if (quietKey(shown.first) == null || isLoading) return;
+      isLoading = true;
+      try {
+        final res = await firstPageAgain();
+        if (res case Success(:final response)) {
+          final fresh = getDataList(response);
+          if (fresh == null ||
+              fresh.isEmpty ||
+              !identical(loadingState.value.dataOrNull, shown)) {
+            return;
+          }
+          final keys = {for (final item in fresh) quietKey(item)};
+          loadingState.value = Success(<T>[
+            ...fresh,
+            for (final item in shown)
+              if (!keys.contains(quietKey(item))) item,
+          ]);
+        }
+      } finally {
+        isLoading = false;
+      }
+      return;
+    }
     _quiet = true;
     try {
       await onRefresh();

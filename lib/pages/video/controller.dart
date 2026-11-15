@@ -932,6 +932,9 @@ class VideoDetailController extends GetxController
       return null;
     }
     _next = null;
+    // Asked for without a language (see [_getVideoUrl]): with one chosen,
+    // the request made now carries it.
+    if (currLang.value != null) return null;
     if (DateTime.now().difference(next.at) > _nextFreshFor) return null;
     return next.result;
   }
@@ -970,6 +973,8 @@ class VideoDetailController extends GetxController
     // Paused at the end, 下一集 is still pressed (an ending song skipped);
     // one video on repeat has no next.
     if (plPlayerController.playRepeat == PlayRepeat.singleCycle) return;
+    // Its request would go without the language chosen ([_takeNext]).
+    if (currLang.value != null) return;
     final nextCid = episode.cid;
     final nextBvid = episode.bvid ?? bvid;
     final nextEpId = isUgc ? null : (episode.epId ?? episode.id);

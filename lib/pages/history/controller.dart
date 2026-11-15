@@ -144,6 +144,24 @@ class HistoryController
   );
 
   @override
+  Object? quietKey(HistoryItemModel item) =>
+      '${item.history.business}_${item.kid}';
+
+  /// The cursor of the pages loaded is put aside for the request and back.
+  @override
+  Future<LoadingState<HistoryData>> firstPageAgain() {
+    final maxBefore = max;
+    final viewAtBefore = viewAt;
+    max = viewAt = null;
+    try {
+      return super.firstPageAgain();
+    } finally {
+      max = maxBefore;
+      viewAt = viewAtBefore;
+    }
+  }
+
+  @override
   void onClose() {
     tabController?.dispose();
     super.onClose();

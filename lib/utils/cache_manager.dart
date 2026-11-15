@@ -31,8 +31,12 @@ abstract final class CacheManager {
   /// page opened a little later, waited for a new TCP and TLS round to the
   /// image CDN (from abroad, a few hundred milliseconds each). Shared with
   /// [warmImageHosts].
+  ///
+  /// Under a minute, as the API's (Request's pool): a request sent as the
+  /// server closes an idle connection fails, dart:io does not send it
+  /// again, and the cover stays empty.
   static final HttpClient _imageHttp = HttpClient()
-    ..idleTimeout = const Duration(seconds: 60);
+    ..idleTimeout = const Duration(seconds: 50);
 
   static Future<void> ensureInitialized() => DefaultCacheManager.init(
     maxNrOfCacheLength: Pref.maxCacheSize.toInt(),

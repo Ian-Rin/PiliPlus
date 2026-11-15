@@ -44,20 +44,22 @@ class VideoCardH extends StatelessWidget {
         clipBehavior: .none,
         children: [
           InkWell(
-            onTapDown: onTap == null
-                ? (_) {
-                    if (!(videoItem.isLive ?? false) &&
-                        (videoItem.redirectUrl?.isEmpty ?? true)) {
-                      PlayUrlPrefetch.start(
-                        bvid: videoItem.bvid,
-                        cid: videoItem.cid,
-                      );
-                    }
-                  }
-                : null,
             onLongPress: onLongPress,
             onSecondaryTap: PlatformUtils.isMobile ? null : onLongPress,
-            onTap: onTap ?? () => pushVideoH(videoItem),
+            // At the tap, not the press: a press that became a scroll or a
+            // long press asked for an address no one took.
+            onTap:
+                onTap ??
+                () {
+                  if (!(videoItem.isLive ?? false) &&
+                      (videoItem.redirectUrl?.isEmpty ?? true)) {
+                    PlayUrlPrefetch.start(
+                      bvid: videoItem.bvid,
+                      cid: videoItem.cid,
+                    );
+                  }
+                  pushVideoH(videoItem);
+                },
             child: Padding(
               padding: const .symmetric(
                 horizontal: Style.safeSpace,
