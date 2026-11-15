@@ -55,11 +55,85 @@ class BtrRangeProxy {
          autoConcurrency: autoConcurrency != null,
        ) {
     _downloader = RipperDownloader(
-      fetch:
-          fetch ??
-          httpClientFetch(_client, userAgent: userAgent, referer: referer),
+      fetch: _timed(
+        fetch ??
+            httpClientFetch(_client, userAgent: userAgent, referer: referer),
+      ),
       getSettings: () => _settings,
       autoConcurrency: autoConcurrency,
+    );
+  }
+
+  // ---------------------------------------------------------------------
+  // What a start's requests took, for [onTrace].
+
+  final _timings = <_Timing>[];
+  final _timingClock = Stopwatch()..start();
+  static const _timingsKept = 512;
+
+  /// [inner], each request timed while [onTrace] is set: when it went out,
+  /// when its answer began and when its last byte came.
+  RipperFetch _timed(RipperFetch inner) => (url, request) {
+    if (onTrace == null || _timings.length >= _timingsKept) {
+      return inner(url, request);
+    }
+    final timing = _Timing(
+      url.pathSegments.isEmpty ? '' : url.pathSegments.last,
+      url.host,
+      request.start,
+      request.end,
+      _timingClock.elapsedMilliseconds,
+    );
+    _timings.add(timing);
+    return inner(url, request).then((response) {
+      timing.answeredAt = _timingClock.elapsedMilliseconds;
+      return response.withBody(
+        _TimedBody(response.body, timing, _timingClock),
+      );
+    });
+  };
+
+  /// One note on the requests that made [window], [track]'s first: a start
+  /// showed a megabyte take two seconds and more with every connection
+  /// free, and nothing told whether the requests went out late (the pieces
+  /// wait for the window's first 64 KiB), waited long for their answers
+  /// (connections to open, a node fetching what it does not hold) or came
+  /// in slowly.
+  void _traceRequests(_Track track, RipperPiece window) {
+    final trace = onTrace;
+    if (trace == null) return;
+    final made = [
+      for (final t in _timings)
+        if (t.file == track.file &&
+            t.start >= window.start &&
+            t.end <= window.end)
+          t,
+    ];
+    if (made.isEmpty) return;
+    String three(List<int> values) {
+      if (values.isEmpty) return '-';
+      values.sort();
+      return '${values.first}/${values[values.length ~/ 2]}/${values.last}';
+    }
+
+    final sent = [for (final t in made) t.sentAt]..sort();
+    final sizes = [for (final t in made) (t.end - t.start + 1) ~/ 1024]..sort();
+    final unfinished = made.where((t) => t.doneAt == null).length;
+    trace(
+      '${track.kind} 第一个窗口的请求 ${made.length} 个、'
+      '${{for (final t in made) t.host}.length} 个节点，'
+      '${sizes.first}–${sizes.last} KiB；'
+      '最晚的比第一个晚 ${sent.last - sent.first}ms 发出；'
+      '等到回应 最快/中位/最慢 '
+      '${three([
+        for (final t in made)
+          if (t.answeredAt case final at?) at - t.sentAt,
+      ])}ms；'
+      '下完 ${three([
+        for (final t in made)
+          if (t.doneAt case final at?) at - t.sentAt,
+      ])}ms'
+      '${unfinished == 0 ? '' : '；没下完 $unfinished 个'}',
     );
   }
 
@@ -330,6 +404,7 @@ class BtrRangeProxy {
         ),
       ),
       isAudio ? 'audio' : 'video',
+      urls.first.pathSegments.isEmpty ? '' : urls.first.pathSegments.last,
     );
     final resume = startAt != null && startAt > Duration.zero ? startAt : null;
     if (resume != null && !isAudio) _resumeKey = Completer<Duration?>();
@@ -924,6 +999,7 @@ class BtrRangeProxy {
             onTrace?.call(
               '${track.kind} 第一个窗口完成 ${current.piece.length ~/ 1024} KiB',
             );
+            _traceRequests(track, current.piece);
           }
           if (track.warmEnd != 0 || current.piece.length > _probeBytes) {
             track.warmEnd = next;
@@ -1014,10 +1090,49 @@ class BtrRangeProxy {
   }
 }
 
+/// One request to a node, timed (see [BtrRangeProxy._timed]).
+class _Timing {
+  _Timing(this.file, this.host, this.start, this.end, this.sentAt);
+
+  /// The last segment of the address's path: the same on every node.
+  final String file;
+  final String host;
+  final int start;
+  final int end;
+  final int sentAt;
+
+  /// When the answer's headers came; null while none has.
+  int? answeredAt;
+
+  /// When the body ended; null if it has not, or was given up.
+  int? doneAt;
+}
+
+class _TimedBody implements RipperBodyReader {
+  _TimedBody(this._inner, this._timing, this._clock);
+
+  final RipperBodyReader _inner;
+  final _Timing _timing;
+  final Stopwatch _clock;
+
+  @override
+  Future<Uint8List?> read() async {
+    final chunk = await _inner.read();
+    if (chunk == null) _timing.doneAt ??= _clock.elapsedMilliseconds;
+    return chunk;
+  }
+
+  @override
+  Future<void> cancel(Object? reason) => _inner.cancel(reason);
+}
+
 class _Track {
-  _Track(this.resolver, this.kind);
+  _Track(this.resolver, this.kind, this.file);
 
   final RipperResolver resolver;
+
+  /// The last segment of its addresses' path (see [_Timing.file]).
+  final String file;
 
   /// "video" or "audio", as upstream's track.kind.
   final String kind;

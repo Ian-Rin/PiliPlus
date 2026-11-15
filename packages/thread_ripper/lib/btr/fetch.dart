@@ -53,6 +53,10 @@ class RipperResponse {
 
   /// headers.get(name), case-insensitive.
   String? header(String name) => _headers[name.toLowerCase()];
+
+  /// This response, its body read through [body].
+  RipperResponse withBody(RipperBodyReader body) =>
+      RipperResponse(status: status, headers: _headers, body: body);
 }
 
 /// fetch(url, { headers: { Range }, signal }): resolves once the response

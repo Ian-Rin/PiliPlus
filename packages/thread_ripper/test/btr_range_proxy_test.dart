@@ -900,18 +900,32 @@ void main() {
     final windowDone = Completer<void>();
     proxy.onTrace = (note) {
       notes.add(note);
-      if (note.contains('第一个窗口完成')) windowDone.complete();
+      if (note.contains('第一个窗口的请求')) windowDone.complete();
     };
     final url = register(['/good']);
     expect((await fetch(url)).$2, source);
     await windowDone.future.timeout(const Duration(seconds: 5));
-    expect(notes, [
+    expect(notes.take(4), [
       'video 开头已取到',
       'video 请求 整个文件',
       'video 首批数据 64 KiB',
       // Cut short by the end of the 1.1 MB file.
       'video 第一个窗口完成 1010 KiB',
     ]);
+    // What that window's requests took: how late the last went out, how
+    // long they waited for an answer, how long for all of it.
+    expect(notes, hasLength(5));
+    expect(
+      notes.last,
+      matches(
+        RegExp(
+          r'^video 第一个窗口的请求 \d+ 个、1 个节点，\d+–\d+ KiB；'
+          r'最晚的比第一个晚 \d+ms 发出；'
+          r'等到回应 最快/中位/最慢 \d+/\d+/\d+ms；'
+          r'下完 \d+/\d+/\d+ms$',
+        ),
+      ),
+    );
     expect(notes.any((note) => note.contains('127.0.0.1')), isFalse);
   });
 
