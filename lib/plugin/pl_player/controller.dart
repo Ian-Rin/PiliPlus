@@ -930,9 +930,26 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
   /// playhead and A-V sync standing still (the default display-resample
   /// sync moves the playhead with the picture; audio sync plays the sound on
   /// under a still picture). A pause and resume changed nothing.
-  /// A change of hwdec has mpv build a new decoder (through software decoding
-  /// for a moment, as two quick changes could be taken as none), and a seek
-  /// to where playback is starts it on a keyframe, from the cache.
+  /// A change of hwdec has mpv build a new decoder and, in the same step,
+  /// seek to the picture last shown, which starts the decoder on a keyframe,
+  /// from the cache.
+  ///
+  /// mpv seeks only if it knows that picture, and it does not while a seek
+  /// is on its way. The rebuild used to go through the software decoder
+  /// (hwdec no, 300 ms, hwdec back, then a seek of the app's): the first
+  /// change's seek, decoding in software from the keyframe (up to 5 s of
+  /// pictures, a second and more for 4K), was still going at the second,
+  /// so the new hardware decoder got the packets that came next, from the
+  /// middle of a group of pictures. ffmpeg found none of their references
+  /// ("Could not find ref with POC"), VideoToolbox failed them (-17694),
+  /// and after three mpv gave the decoder up, before the app's seek came.
+  /// Logs showed some thirty returns end on the software decoder that way,
+  /// nearly every one of a 4K video, and a retry a second later meet the
+  /// same.
+  ///
+  /// Now the value is changed to another spelling of the same decoder (a
+  /// list naming it twice, and back the next time: a value that is the same
+  /// would be no change), once no seek is on its way.
   void _reseedDecoder(Player player) {
     final hw = hwdec;
     if (onlyPlayAudio.value || hw == null || hw == 'no') return;
@@ -958,18 +975,30 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
         _bgTrace?.mark(
           '重建硬件解码器，从 ${_seconds(player.state.position)} 前的关键帧重新解码',
         );
-        try {
-          player.setProperty('hwdec', 'no');
-          await Future<void>.delayed(const Duration(milliseconds: 300));
+        var waited = 0;
+        while (_mpvSeeking(player) && waited < 3000) {
+          await Future<void>.delayed(const Duration(milliseconds: 100));
+          waited += 100;
           if (!current()) return;
-          player.setProperty('hwdec', hw);
+        }
+        final settled = !_mpvSeeking(player);
+        if (waited > 0) {
+          _bgTrace?.mark(
+            settled ? '等上一次跳转结束 ${waited}ms' : '上一次跳转 ${waited}ms 还没结束，照常重建',
+          );
+        }
+        final at = player.state.position;
+        _appMovesPlayhead(at);
+        try {
+          final now = player.getProperty('options/hwdec');
+          player.setProperty('hwdec', now == hw ? '$hw,$hw' : hw);
         } catch (_) {
           return;
         }
-        // Where playback is now: playing, it went on for those 300 ms.
-        final at = player.state.position;
-        _appMovesPlayhead(at);
-        await player.seek(at);
+        // mpv did not seek (it knew no picture to seek to): the app does,
+        // as before. The decoder may be given packets from the middle of a
+        // group until this comes; thirty failed frames are let pass now.
+        if (!settled) await player.seek(at);
       } finally {
         _reseeding = false;
       }
@@ -982,10 +1011,19 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     }();
   }
 
-  /// Set while [_reseedDecoder] changes hwdec and seeks: the decoder is the
-  /// software one on purpose then, and the old decoder's last failures are
-  /// not new ones.
+  /// Set while [_reseedDecoder] changes hwdec and seeks: the old decoder's
+  /// last failures are not new ones.
   bool _reseeding = false;
+
+  /// A seek is on its way (mpv's `seeking`: until the picture and the sound
+  /// have started again).
+  static bool _mpvSeeking(Player player) {
+    try {
+      return player.getProperty('seeking') == 'yes';
+    } catch (_) {
+      return false;
+    }
+  }
 
   /// mpv said a hardware decode failed while the app was away: the decoder
   /// is rebuilt on the return however short the trip ([_backFromAway]).
@@ -1596,6 +1634,9 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
         source is! NetworkSource ||
         !listEquals(source.videoCandidates, next.videoCandidates) ||
         !listEquals(audio, next.audioCandidates)) {
+      // Made for another video than the one opened: closed, not left
+      // listening with its windows until the next one is made.
+      _dropNextProxy();
       return null;
     }
     _nextProxy = null;
@@ -1709,8 +1750,12 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     // starts at the next keyframe). Thirty frames in a row (about a second)
     // let those few pass; a decoder that truly fails (iOS invalidates it
     // in the background) still gives way, a second later.
+    // The option is vd-lavc-software-fallback in the mpv the app is built
+    // with (0.39; hwdec-software-fallback is its name from 0.40 on, where
+    // the old one is still taken). Under the new name it was never set:
+    // logs went on showing the decoder given up after three frames.
     if (Platform.isIOS && hwdec != null && hwdec != 'no') {
-      opt['hwdec-software-fallback'] = '30';
+      opt['vd-lavc-software-fallback'] = '30';
     }
 
     final player = await Player.create(
@@ -1832,7 +1877,9 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     // from it until then, and says so ("Stream ends prematurely", then
     // "Connection refused" as ffmpeg tries again): a log entry at every
     // switch that told nothing.
-    if (_ripperProxy != null) _droppingOldStream = true;
+    if (_ripperProxy != null) {
+      _droppingOldStreamUntil = DateTime.now().add(const Duration(seconds: 5));
+    }
     _ripperProxy?.close();
     _ripperProxy = null;
     String video = dataSource.videoSource;
@@ -1938,14 +1985,18 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
       play: false,
     );
     // mpv has let go of the file before.
-    _droppingOldStream = false;
+    _droppingOldStreamUntil = DateTime(0);
     // The old picture is hidden by the player from here on.
     stalePicture.value = false;
   }
 
   /// From the old proxy's close to mpv taking the new file: what mpv says of
-  /// the old stream meanwhile is not logged ([_noteMpvError]).
-  bool _droppingOldStream = false;
+  /// the old stream meanwhile is not logged ([_noteMpvError]). A time, not
+  /// a flag: an open that returns early or throws never came to clear one,
+  /// and mpv's errors stayed unlogged from then on.
+  DateTime _droppingOldStreamUntil = DateTime(0);
+  bool get _droppingOldStream =>
+      DateTime.now().isBefore(_droppingOldStreamUntil);
 
   /// The player is kept from one video to the next, and so is what was set
   /// on it for the one before. A log showed the switch to the next video in
@@ -2161,6 +2212,7 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
   /// cache reaches. (Logs showed such seeks, the cache 48 s and 61 s past
   /// the target, logged as not recovered in 15 s.)
   bool _seekInCache = false;
+  DateTime _seekingLookedAt = DateTime(0);
 
   static bool _cached(Player player, Duration at) {
     try {
@@ -2224,6 +2276,14 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
         if (state.buffer < _seekTarget + const Duration(milliseconds: 300)) {
           return;
         }
+        // A synchronous read, and this runs at every position and buffer
+        // event: four a second at most.
+        final now = DateTime.now();
+        if (now.difference(_seekingLookedAt) <
+            const Duration(milliseconds: 250)) {
+          return;
+        }
+        _seekingLookedAt = now;
         try {
           if (player.getProperty('seeking') != 'no') return;
         } catch (_) {
@@ -2812,6 +2872,15 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     danmakuController?.clear();
     _ripperRestarting = true;
     _appMovesPlayhead(position);
+    // Cleared as the spinner of the seek ends; a seek within the cache
+    // (paused, say) may bring none, and the flag stayed set: playback was
+    // then taken for not going, and its next wait for data not counted.
+    final movedAt = _appMovedAt;
+    Future<void>.delayed(const Duration(seconds: 2), () {
+      if (identical(_appMovedAt, movedAt) && !isBuffering.value) {
+        _ripperRestarting = false;
+      }
+    });
     try {
       await _videoPlayerController?.seek(position);
       _updateIOSPip(position);
