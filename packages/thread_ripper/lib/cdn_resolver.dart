@@ -394,6 +394,20 @@ class RipperBanList {
 
   static String _address(Uri url) => '${url.path}?${url.query}';
 
+  /// For a log: how many requests came back without a byte so far, refused
+  /// by a node (HTTP 4xx, as addresses past their time are) and otherwise.
+  (int refused, int other) get emptyReplies {
+    var refused = 0, other = 0;
+    for (final entry in _emptyReplies.entries) {
+      if (entry.key.$3) {
+        refused += entry.value;
+      } else {
+        other += entry.value;
+      }
+    }
+    return (refused, other);
+  }
+
   void failure(Uri url, {int status = 0, int received = 0}) {
     if (received > 0) return;
     final key = (url.host, _address(url), status >= 400 && status < 500);

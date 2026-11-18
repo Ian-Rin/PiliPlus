@@ -594,6 +594,8 @@ void main() {
     proxy.close();
     proxy = BtrRangeProxy(concurrency: 4, userAgent: 'test');
     await proxy.start();
+    final gaveUp = <String>[];
+    proxy.onGaveUp = gaveUp.add;
     final url = register(['/forbidden']);
     await Future<void>.delayed(const Duration(milliseconds: 300));
     final before = requests.length;
@@ -601,6 +603,15 @@ void main() {
     final result = await fetch(url);
     expect(result.$1.statusCode, 502);
     expect(requests.length, greaterThan(before));
+    // Why, for the app's log: the track, that nothing was sent, the node's
+    // status, and no address.
+    expect(gaveUp, hasLength(1));
+    expect(gaveUp.single, startsWith('video 没能开始：'));
+    expect(
+      gaveUp.single,
+      matches(RegExp(r'节点拒绝 [1-9]\d* 次、没给数据 0 次，4 线程$')),
+    );
+    expect(gaveUp.single, isNot(contains('127.0.0.1')));
   });
 
   // The next video in a list is made ready while the one before ends: its

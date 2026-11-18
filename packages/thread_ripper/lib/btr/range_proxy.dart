@@ -228,6 +228,24 @@ class BtrRangeProxy {
   /// Startup diagnostics: short notes on a track's requests and first bytes,
   /// while set. No addresses.
   void Function(String note)? onTrace;
+
+  /// A request of mpv's that could not be served to its end: mpv sees its
+  /// stream cut short ("Stream ends prematurely") or a 502, and nothing
+  /// said why. Which track, how far it got and the error, without addresses.
+  void Function(String note)? onGaveUp;
+
+  /// [error] for a log: its kind, an HTTP status if a node gave one, and
+  /// its words with any address taken out (they are signed).
+  static String _reason(Object error) {
+    final status = errorStatus(error);
+    final words = (error is RipperError ? error.message : '$error')
+        .replaceAll(RegExp(r'https?://[^\s,]+'), '（地址）')
+        .replaceAll('\n', ' ');
+    return '${errorName(error)}'
+        '${status == null ? '' : ' HTTP $status'} '
+        '${words.length > 160 ? words.substring(0, 160) : words}';
+  }
+
   HttpServer? _server;
   int? _port;
   final String _token = List.generate(
@@ -1016,7 +1034,18 @@ class BtrRangeProxy {
         );
         await _race(socket.close(), job.signal);
       } catch (_) {}
-    } catch (_) {
+    } catch (error) {
+      // A request the proxy gives up, not one mpv ended: said, so that a
+      // log tells a node's refusal (addresses past their time) from a
+      // network that is gone.
+      if (!job.signal.aborted && !_closed) {
+        final (refused, other) = _bans.emptyReplies;
+        onGaveUp?.call(
+          '${track.kind} ${sentHeaders ? '读到一半中断' : '没能开始'}：'
+          '${_reason(error)}，节点拒绝 $refused 次、没给数据 $other 次，'
+          '$concurrency 线程',
+        );
+      }
       // Once the headers are out, the reset below shows mpv a stream cut
       // short instead of pretending it completed.
       if (!sentHeaders && !job.signal.aborted) {

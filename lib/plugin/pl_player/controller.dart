@@ -830,16 +830,81 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
   /// corrupt`) and only then was the video reopened with fresh ones. Past
   /// that time (a minute before, to be safe), the return reopens at once.
   bool _addressesExpired() {
-    if (isLive) return false;
+    final until = _addressesGoodUntil();
+    return until != null && DateTime.now().isAfter(until);
+  }
+
+  /// A minute before the time the addresses are signed until; null if they
+  /// carry none (a live stream, a file).
+  DateTime? _addressesGoodUntil() {
+    if (isLive) return null;
     final source = dataSource;
-    if (source is! NetworkSource) return false;
+    if (source is! NetworkSource) return null;
     final value = Uri.tryParse(source.videoSource)?.queryParameters['deadline'];
     final seconds = value == null ? null : int.tryParse(value);
-    if (seconds == null) return false;
-    final deadline = DateTime.fromMillisecondsSinceEpoch(seconds * 1000);
-    return DateTime.now().isAfter(
-      deadline.subtract(const Duration(minutes: 1)),
+    if (seconds == null) return null;
+    return DateTime.fromMillisecondsSinceEpoch(
+      seconds * 1000,
+    ).subtract(const Duration(minutes: 1));
+  }
+
+  Timer? _expiryWatch;
+
+  /// The addresses are good for two hours, and only a return from the
+  /// background looked at the time. A video of four hours played on in the
+  /// foreground past it: a log showed, two hours to the half minute after
+  /// the addresses were given, mpv's stream cut at one byte three times in
+  /// twenty seconds ("Stream ends prematurely"), a packet cut in two
+  /// ("Invalid NAL unit size"), and the video reopened only once mpv gave
+  /// the file up, forty seconds on.
+  ///
+  /// Set as a video's addresses are (a reopening's too, so it comes again
+  /// two hours later): at that time the video is reopened with new ones,
+  /// where it is, before the old ones fail.
+  void _watchAddresses() {
+    _expiryWatch?.cancel();
+    _expiryWatch = null;
+    final until = _addressesGoodUntil();
+    if (until == null) return;
+    final left = until.difference(DateTime.now());
+    // Past it as they are given: not this timer's to mend, and a reopening
+    // that got the same again would go round.
+    if (left <= Duration.zero) return;
+    _expiryWatch = Timer(left, _reopenBeforeExpiry);
+  }
+
+  void _reopenBeforeExpiry() {
+    _expiryWatch = null;
+    final player = _videoPlayerController;
+    final reopen = onStreamBrokeOff;
+    // Without the page there are no new addresses to be had.
+    if (player == null || _playerCount == 0 || reopen == null) return;
+    // Away: the return looks at the time ([_backFromAway]).
+    if (_backgroundSince != null ||
+        WidgetsBinding.instance.lifecycleState != AppLifecycleState.resumed) {
+      return;
+    }
+    final duration = player.state.duration;
+    final at = player.state.position;
+    if (playerStatus.isCompleted ||
+        (duration > Duration.zero &&
+            duration - at < const Duration(seconds: 1))) {
+      return;
+    }
+    // Paused, nothing is read and nothing fails: a reopening would start
+    // the sound. Looked at again until it plays.
+    if (!player.state.playing) {
+      _expiryWatch = Timer(const Duration(seconds: 2), _reopenBeforeExpiry);
+      return;
+    }
+    Utils.reportError(
+      '[地址到期] 播放地址快到期了，在 ${_seconds(at)} 换新地址重新打开',
     );
+    SmartDialog.showToast(
+      '播放地址到期，换新地址继续播放',
+      displayTime: const Duration(milliseconds: 800),
+    );
+    reopen(at);
   }
 
   /// A rebuild of the decoder waits for resumed: it decodes from the cache
@@ -1450,6 +1515,7 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
       this.width = width;
       this.height = height;
       this.dataSource = dataSource;
+      _watchAddresses();
       _autoPlay = autoplay;
       // 初始化数据加载状态
       dataStatus.value = DataStatus.loading;
@@ -1577,7 +1643,24 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
         ? _ripperAutoConcurrency
         : null,
     userAgent: BrowserUa.pc,
-  );
+  )..onGaveUp = _noteProxyGaveUp;
+
+  DateTime _proxyGaveUpAt = DateTime(0);
+
+  /// mpv's "Stream ends prematurely" says a stream was cut, not why: logs
+  /// held a dozen in three days, some a network gone, some addresses past
+  /// their time, and could not tell which. The proxy's reason, once in
+  /// twenty seconds (mpv asks again at the same byte every few seconds).
+  void _noteProxyGaveUp(String note) {
+    final now = DateTime.now();
+    if (now.difference(_proxyGaveUpAt) < const Duration(seconds: 20)) return;
+    _proxyGaveUpAt = now;
+    final until = _addressesGoodUntil();
+    Utils.reportError(
+      '[加速中断] $note'
+      '${until == null ? '' : '，地址${now.isAfter(until) ? '已到期' : '还有 ${until.difference(now).inMinutes} 分钟到期'}'}',
+    );
+  }
 
   /// A proxy for the next video in a list, made while this one ends (see
   /// VideoDetailController.prepareNext): its tracks' heads and first windows
@@ -3127,6 +3210,16 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     // entry here (20 to 56 s in the cache) beside each of those.
     final cached = _mpvNumber(player, 'demuxer-cache-duration');
     if (cached != null && cached >= 3) return;
+    // Played to the video's end, nothing is left to download: three of
+    // twenty-one entries in a log were that (26.6 s of 26.7), not a wait.
+    final duration = player.state.duration;
+    final reached = player.state.buffer > player.state.position
+        ? player.state.buffer
+        : player.state.position;
+    if (duration > Duration.zero &&
+        duration - reached < const Duration(seconds: 1)) {
+      return;
+    }
     _lastFastStall = now;
     String read(String name) {
       try {
@@ -3702,6 +3795,8 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     }
 
     _playerCount = 0;
+    _expiryWatch?.cancel();
+    _expiryWatch = null;
     _ripperGeneration++;
     _ripperProxy?.close();
     _ripperProxy = null;
