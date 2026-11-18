@@ -133,6 +133,15 @@ List<SettingsModel> get videoSettings => [
     setKey: SettingBoxKey.threadRipperAutoConcurrency,
     defaultVal: true,
   ),
+  const SwitchModel(
+    title: '线程撕裂者：按网速选起始画质',
+    subtitle:
+        '半小时内测到的下载速度带不动默认画质时，打开视频先用低一档或几档的画质，并提示；'
+        '播放中不会自动切换，可以手动切回',
+    leading: Icon(Icons.network_check),
+    setKey: SettingBoxKey.threadRipperStartQuality,
+    defaultVal: true,
+  ),
   NormalModel(
     title: '线程撕裂者：自定义节点',
     leading: const Icon(Icons.dns_outlined),

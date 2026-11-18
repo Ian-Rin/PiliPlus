@@ -319,6 +319,12 @@ abstract final class Pref {
     SettingBoxKey.threadRipperAutoConcurrency,
     defaultValue: true,
   );
+  // A video starts below the quality set where the connection has just
+  // shown that it does not carry it (RipperSpeed).
+  static bool get threadRipperStartQuality => _setting.get(
+    SettingBoxKey.threadRipperStartQuality,
+    defaultValue: true,
+  );
   static List<String> get threadRipperCustomHosts => List<String>.from(
     _setting.get(
       SettingBoxKey.threadRipperCustomHosts,

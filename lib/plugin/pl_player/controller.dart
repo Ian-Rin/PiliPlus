@@ -49,6 +49,7 @@ import 'package:PiliPlus/utils/path_utils.dart';
 import 'package:PiliPlus/utils/platform_utils.dart';
 import 'package:PiliPlus/utils/storage.dart';
 import 'package:PiliPlus/utils/storage_key.dart';
+import 'package:PiliPlus/utils/ripper_speed.dart';
 import 'package:PiliPlus/utils/storage_pref.dart';
 import 'package:PiliPlus/utils/utils.dart';
 import 'package:archive/archive.dart' show getCrc32;
@@ -1633,17 +1634,21 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     }
   }
 
-  BtrRangeProxy _newRipperProxy() => BtrRangeProxy(
-    client: _ripperClient,
-    concurrency: Pref.threadRipperConcurrency,
-    overseas: Pref.threadRipperOverseas,
-    overseasStart: Pref.threadRipperRegion == RipperRegion.auto,
-    customHosts: Pref.threadRipperCustomHosts,
-    autoConcurrency: Pref.threadRipperAutoConcurrency
-        ? _ripperAutoConcurrency
-        : null,
-    userAgent: BrowserUa.pc,
-  )..onGaveUp = _noteProxyGaveUp;
+  BtrRangeProxy _newRipperProxy() =>
+      BtrRangeProxy(
+          client: _ripperClient,
+          concurrency: Pref.threadRipperConcurrency,
+          overseas: Pref.threadRipperOverseas,
+          overseasStart: Pref.threadRipperRegion == RipperRegion.auto,
+          customHosts: Pref.threadRipperCustomHosts,
+          autoConcurrency: Pref.threadRipperAutoConcurrency
+              ? _ripperAutoConcurrency
+              : null,
+          userAgent: BrowserUa.pc,
+        )
+        ..onGaveUp = _noteProxyGaveUp
+        // What the connection does, for the quality the next video starts on.
+        ..onSpeed = RipperSpeed.note;
 
   DateTime _proxyGaveUpAt = DateTime(0);
 

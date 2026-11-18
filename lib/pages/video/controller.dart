@@ -63,6 +63,7 @@ import 'package:PiliPlus/utils/path_utils.dart';
 import 'package:PiliPlus/utils/platform_utils.dart';
 import 'package:PiliPlus/utils/reply_scheme_helper.dart';
 import 'package:PiliPlus/utils/storage.dart';
+import 'package:PiliPlus/utils/ripper_speed.dart';
 import 'package:PiliPlus/utils/storage_pref.dart';
 import 'package:PiliPlus/utils/subtitle_utils.dart';
 import 'package:PiliPlus/utils/theme_utils.dart';
@@ -74,6 +75,7 @@ import 'package:extended_nested_scroll_view/extended_nested_scroll_view.dart'
     show ExtendedNestedScrollViewState;
 import 'package:flutter/foundation.dart' show kDebugMode, compute;
 import 'package:flutter_smart_dialog/flutter_smart_dialog.dart';
+import 'package:thread_ripper/speed_memory.dart';
 import 'package:flutter_volume_controller/flutter_volume_controller.dart';
 import 'package:get/get.dart';
 import 'package:hive_ce/hive.dart';
@@ -875,6 +877,64 @@ class VideoDetailController extends GetxController
     );
   }
 
+  /// The quality a video starts on: [want] (the one set), or a lower one
+  /// of [videos] where the download speed measured lately does not carry
+  /// [want]'s stream (see [RipperSpeed]). [want] itself when the setting is
+  /// off, no speed is known, or the streams cannot be told.
+  int _startQuality(List<VideoItem> videos, PlayUrlModel response, int want) {
+    if (!Pref.threadRipperStartQuality || videos.isEmpty) return want;
+    final kbps = RipperSpeed.known();
+    if (kbps == null) return want;
+    try {
+      // The stream that would play at a quality: its codec's, as picked.
+      VideoItem streamAt(int quality) => VideoUtils.findTargetVideo(
+        videos,
+        quality,
+        response.acceptQuality,
+        response.supportFormats!,
+        preferCodecs,
+      ).$4;
+      final first = streamAt(want);
+      final below =
+          videos.availableVideoQualities
+              .where((quality) => quality < first.id)
+              .toList()
+            ..sort((a, b) => b.compareTo(a));
+      final offered = [
+        (quality: first.id, bandwidth: first.bandWidth ?? 0),
+        for (final quality in below)
+          if (streamAt(quality) case final stream when stream.id == quality)
+            (quality: quality, bandwidth: stream.bandWidth ?? 0),
+      ];
+      final picked = RipperSpeedMemory.pick(offered, kbps);
+      // The quality set, not the one nearest to it that the video has: the
+      // caller looks that up as before.
+      return picked == first.id ? want : picked;
+    } catch (_) {
+      return want;
+    }
+  }
+
+  /// Told to the viewer, and to the start's log: the video starts below
+  /// the quality set.
+  void _sayStartQuality(List<VideoItem> videos, int set, int picked) {
+    final kbps = RipperSpeed.known();
+    if (kbps == null) return;
+    final speed = (kbps / 1000).toStringAsFixed(1);
+    final to = VideoQuality.fromCode(picked).shortDesc;
+    final from = VideoQuality.fromCode(
+      set > videos.first.id ? videos.first.id : set,
+    ).shortDesc;
+    plPlayerController.noteBeforeOpen(
+      DateTime.now(),
+      '下载速度约 $speed Mbit/s，带不动 $from，从 $to 开始',
+    );
+    SmartDialog.showToast(
+      '网速约 $speed Mbit/s，先用 $to（设定 $from）',
+      displayTime: const Duration(seconds: 2),
+    );
+  }
+
   /// The play addresses, with the qualities the first answer left out.
   /// [first]: the first request, already on its way ([PlayUrlPrefetch]);
   /// asked again when it failed.
@@ -901,7 +961,9 @@ class VideoDetailController extends GetxController
         final want = plPlayerController.cacheVideoQa;
         if (want == null ||
             (want < videos.first.id &&
-                !videos.availableVideoQualities.contains(want))) {
+                !videos.availableVideoQualities.contains(want)) ||
+            // The start may be on one of them ([_startQuality]).
+            _startQuality(videos, response, want) != want) {
           await more;
         } else {
           more.ignore();
@@ -1000,7 +1062,7 @@ class VideoDetailController extends GetxController
       // What [_queryVideoUrl] will pick.
       final (_, _, _, video) = VideoUtils.findTargetVideo(
         videos,
-        cacheVideoQa,
+        _startQuality(videos, response, cacheVideoQa),
         response.acceptQuality,
         response.supportFormats!,
         preferCodecs,
@@ -1049,6 +1111,7 @@ class VideoDetailController extends GetxController
     }
     if (PlatformUtils.isMobile || Platform.isLinux) {
       final isWiFi = await ConnectivityUtils.isWiFi;
+      RipperSpeed.onWifi = isWiFi;
       if (plPlayerController.cacheVideoQa == null) {
         plPlayerController
           ..cacheVideoQa = isWiFi
@@ -1172,6 +1235,18 @@ class VideoDetailController extends GetxController
         return;
       }
       final cacheVideoQa = plPlayerController.cacheVideoQa!;
+      // Opened again (its stream broke off, its addresses ran out, another
+      // language or node): the quality it plays, which may be one the start
+      // chose below the one set. A new video: by the speed known.
+      final int wantQa;
+      if (fromReset) {
+        wantQa = currentVideoQa.value?.code ?? cacheVideoQa;
+      } else {
+        wantQa = _startQuality(video, response, cacheVideoQa);
+        if (wantQa != cacheVideoQa) {
+          _sayStartQuality(video, cacheVideoQa, wantQa);
+        }
+      }
       final (
         int targetQuality,
         FormatItem targetFormat,
@@ -1179,7 +1254,7 @@ class VideoDetailController extends GetxController
         VideoItem targetVideo,
       ) = VideoUtils.findTargetVideo(
         video,
-        cacheVideoQa,
+        wantQa,
         response.acceptQuality,
         response.supportFormats!,
         preferCodecs,

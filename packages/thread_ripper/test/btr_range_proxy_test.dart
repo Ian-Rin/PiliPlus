@@ -940,6 +940,53 @@ void main() {
     expect(notes.any((note) => note.contains('127.0.0.1')), isFalse);
   });
 
+  // The app chooses a video's first quality by what the connection did for
+  // the last one (see RipperSpeedMeter).
+  test('a reader waiting on a slow link gets the link\'s speed', () async {
+    source = Uint8List.fromList(
+      List.generate(5 * 1024 * 1024 + 70000, (i) => (i * 37) % 251),
+    );
+    final flatOut = <int>[];
+    proxy.onSpeed = (kbps, {required sustained}) {
+      if (sustained) flatOut.add(kbps);
+    };
+    // Every connection brings 160 KiB/s: four of them 5.2 Mbit/s at most,
+    // less for the second copies of pieces that take long.
+    final result = await fetch(register(['/pace']));
+    expect(result.$2, source);
+    expect(flatOut, isNotEmpty);
+    for (final kbps in flatOut) {
+      expect(kbps, inInclusiveRange(1000, 5400));
+    }
+  }, timeout: const Timeout(Duration(seconds: 60)));
+
+  test('a fast node says only the least it does', () async {
+    source = Uint8List.fromList(
+      List.generate(7 * 1024 * 1024, (i) => (i * 37) % 251),
+    );
+    final flatOut = <int>[], least = <int>[];
+    proxy.onSpeed = (kbps, {required sustained}) =>
+        (sustained ? flatOut : least).add(kbps);
+    final response = await (await client.getUrl(
+      Uri.parse(register(['/good'])),
+    )).close();
+    var got = 0, paused = false;
+    await for (final chunk in response) {
+      got += chunk.length;
+      // The reader stops for a moment, as mpv does with its cache full:
+      // the windows ahead arrive meanwhile.
+      if (!paused) {
+        paused = true;
+        await Future<void>.delayed(const Duration(milliseconds: 600));
+      }
+    }
+    expect(got, source.length);
+    // A second of downloads is no measurement of what the link keeps up.
+    expect(flatOut, isEmpty);
+    expect(least, isNotEmpty);
+    expect(least.every((kbps) => kbps > 10000), isTrue);
+  });
+
   // iOS may take back a suspended app's listening socket (TN2277); mpv
   // keeps the addresses it was given.
   test('revive listens again on the same port, tracks intact', () async {

@@ -8,6 +8,10 @@ abstract final class SettingBoxKey {
   static const threadRipperConcurrency = 'threadRipperConcurrency';
   static const threadRipperAutoConcurrency = 'threadRipperAutoConcurrency';
   static const threadRipperCustomHosts = 'threadRipperCustomHosts';
+  static const threadRipperStartQuality = 'threadRipperStartQuality';
+  // Not settings: the download speed last measured (RipperSpeed).
+  static const ripperSpeedWifi = 'ripperSpeedWifi';
+  static const ripperSpeedCellular = 'ripperSpeedCellular';
   static const String btmProgressBehavior = 'btmProgressBehavior',
       defaultVideoQa = 'defaultVideoQa',
       defaultVideoQaCellular = 'defaultVideoQaCellular',

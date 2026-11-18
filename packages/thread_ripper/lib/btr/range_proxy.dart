@@ -21,6 +21,7 @@ import 'package:thread_ripper/btr/http_fetch.dart';
 import 'package:thread_ripper/btr/range_core.dart';
 import 'package:thread_ripper/btr/resolver.dart';
 import 'package:thread_ripper/btr/sidx.dart';
+import 'package:thread_ripper/btr/speed_meter.dart';
 import 'package:thread_ripper/cdn_resolver.dart';
 
 /// What [BtrRangeProxy.revive] found.
@@ -228,6 +229,12 @@ class BtrRangeProxy {
   /// Startup diagnostics: short notes on a track's requests and first bytes,
   /// while set. No addresses.
   void Function(String note)? onTrace;
+
+  /// The video track's download speed in kbit/s, as windows are handed to
+  /// mpv (see [RipperSpeedMeter]). [sustained]: measured while mpv waited on
+  /// the download, what the connection does; otherwise one window's own
+  /// speed, the least it does.
+  void Function(int kbps, {required bool sustained})? onSpeed;
 
   /// A request of mpv's that could not be served to its end: mpv sees its
   /// stream cut short ("Stream ends prematurely") or a 502, and nothing
@@ -755,7 +762,8 @@ class BtrRangeProxy {
     required bool startup,
     num? priority,
   }) {
-    final result = _Window(window);
+    final result = _Window(window)
+      ..startedAt = _timingClock.elapsedMilliseconds;
     var received = 0;
     int? total;
     Future<void> run() async {
@@ -795,6 +803,7 @@ class BtrRangeProxy {
     result._done.then(
       (_) => result
         ..complete = true
+        ..arrivedAt = _timingClock.elapsedMilliseconds
         .._markScheduled(),
       onError: (Object _) => result
         ..failed = true
@@ -916,6 +925,13 @@ class BtrRangeProxy {
         onTrace?.call('${track.kind} 请求 ${header ?? '整个文件'}');
         if (seeked && track.kind == 'video') _warmAudioAtSeek(track, start);
         var traced = false;
+        // mpv let bytes it was handed wait: the window they are of took the
+        // time mpv gave it, not the download's.
+        var heldBack = false;
+        final meter = track.kind == 'video' && onSpeed != null
+            ? RipperSpeedMeter()
+            : null;
+        var windows = 0;
         // Headers go out with the first bytes, so a request that fails before
         // any arrive is a 502, not a stream cut short.
         _handedOver[job] = null;
@@ -929,10 +945,15 @@ class BtrRangeProxy {
           // flush() waits once the socket's buffers are full: mpv is not
           // reading (see playerIdle).
           _handedOver[job] = DateTime.now();
+          final handedAt = _timingClock.elapsedMilliseconds;
           try {
             await _race(socket.flush(), job.signal);
           } finally {
             if (_handedOver.containsKey(job)) _handedOver[job] = null;
+          }
+          if (_timingClock.elapsedMilliseconds - handedAt >=
+              _idleAfter.inMilliseconds) {
+            heldBack = true;
           }
         }
 
@@ -981,6 +1002,17 @@ class BtrRangeProxy {
           depth = current.complete
               ? max(1, depth - 1)
               : min(maxAheadWindows, depth * 2);
+          // For the meter: taken before it had all arrived, mpv waits on
+          // the download; arrived already, only its own speed is known.
+          final waited = !current.complete;
+          if (meter != null && !waited) {
+            final took = (current.arrivedAt ?? 0) - current.startedAt;
+            if (RipperSpeedMeter.burst(current.piece.length, took)
+                case final kbps?) {
+              onSpeed?.call(kbps, sustained: false);
+            }
+          }
+          heldBack = false;
           final attached = current.attach(deliver)..ignore();
           // A start downloads its head first and queues its pieces after it:
           // the next window waits for those, as upstream's prefetch waits for
@@ -1012,6 +1044,16 @@ class BtrRangeProxy {
             track.warmEnd = 0;
             rethrow;
           }
+          // Not a request's first window: its time is the nodes' answers.
+          if (meter?.window(
+                current.piece.length,
+                waited: waited && windows > 0 && !heldBack,
+                now: _timingClock.elapsedMilliseconds,
+              )
+              case final kbps?) {
+            onSpeed?.call(kbps, sustained: true);
+          }
+          windows++;
           if (current.piece.start == start ||
               (head != null && start == 0 && current.piece.start == cursor)) {
             onTrace?.call(
@@ -1216,6 +1258,11 @@ class _Window {
 
   /// Whether all of it has arrived.
   bool complete = false;
+
+  /// When its download began and when the last of it arrived (the proxy's
+  /// clock, milliseconds): its own speed, if no one was taking it.
+  int startedAt = 0;
+  int? arrivedAt;
   final _scheduled = Completer<void>();
   final _kept = <Uint8List>[];
 
