@@ -387,6 +387,10 @@ class Request {
     List<int> responseBytes,
     Map<String, List<String>> headers,
   ) => switch (headers['content-encoding']?.firstOrNull) {
+    // A HEAD's answer names the encoding its body would have and has no
+    // body: the brotli decoder throws on nothing ("Corrupted Huffman code
+    // histogram"), and the request failed with its headers in hand.
+    _ when responseBytes.isEmpty => responseBytes,
     'gzip' => gzip.convert(responseBytes),
     'br' => brotli.convert(responseBytes),
     _ => responseBytes,
