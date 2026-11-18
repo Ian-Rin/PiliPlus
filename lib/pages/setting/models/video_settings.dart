@@ -64,7 +64,7 @@ List<SettingsModel> get videoSettings => [
   ),
   const SwitchModel(
     title: '线程撕裂者',
-    subtitle: '2026.10.8.1 下载核心，并发下载音视频；下次加载视频生效',
+    subtitle: '2026.11.15.1 下载核心，并发下载音视频；下次加载视频生效',
     leading: Icon(Icons.speed),
     setKey: SettingBoxKey.threadRipperEnabled,
     defaultVal: true,

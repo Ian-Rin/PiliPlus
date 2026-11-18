@@ -1,7 +1,7 @@
 # 线程撕裂者下载层
 
-参考 Bilibili-thread-ripper **2026.11.3.1** 正式版（上游提交
-`e409a42cb`）移植共享下载核心：
+参考 Bilibili-thread-ripper **2026.11.15.1** 正式版（上游提交
+`ef014b270`）移植共享下载核心：
 https://github.com/MrTangLuyao/Bilibili-thread-ripper
 
 0.9.4.2 之后上游下载核心只改了自动线程数（2026.9.29.1 起播加速，2026.10.7.1 上限提到 64），已同步；`range-core.js`、`cdn-resolver.js`
@@ -12,6 +12,12 @@ https://github.com/MrTangLuyao/Bilibili-thread-ripper
 2026.10.8.1 → 2026.11.3.1：`cdn-resolver.js` 的中继地址修复（上游 #47）和大陆节点 `mirrorcoso1`（上游 #44）已同步；
 `idm-downloader.js` 只抽出了 `roundPause`、`orderedDelivery` 两个函数，行为不变，自动线程数和任务分配的对照数据逐字节相同；
 `range-core.js` 新增的设置（阻止国际版、首次引导、全接管预缓冲时长、二级缓冲）都属于网页端。
+2026.11.3.1 → 2026.11.15.1（以及其后的 Canary 2026.11.18.1）：`idm-downloader.js`、`cdn-resolver.js` 一个字节都没有变，
+`range-core.js` 只动了网页端的设置（去掉 Debug 开关，新增音频加速开关和自动清晰度上限）和一个给面板用的 `formatSpeed`，
+对照数据逐字节相同。这段时间上游的更新都在网页端：全接管下自动清晰度按下载速度选择并可设上限（#69）、
+部分视频停在 0 秒（#65）、切回标签页声音停顿（#66）、切回原清晰度提示失败（#67）、阻止国际版失效（#68）、
+兼容模式下其他脚本换过地址的视频也加速（#71）、BTR 统计信息面板、诊断信息、设置面板样式，不适用于原生播放器。
+唯一在原生播放器上有对应做法的是「音频加速」开关（关掉后音频不走并发下载，只加速视频），没有同步：这里的音频一直走代理。
 
 参考 `src/range-core.js`、`src/cdn-resolver.js`、`src/idm-downloader.js`。
 MIT 版权声明见 [许可证](licenses/bilibili-thread-ripper.txt)。
@@ -87,7 +93,7 @@ MIT 版权声明见 [许可证](licenses/bilibili-thread-ripper.txt)。
 ## 逐行移植的下载器（`packages/thread_ripper/lib/btr/`）
 
 `range_proxy.dart` 的下载调度是按原版思路重写的，不是逐行移植。`lib/btr/` 是原版 `idm-downloader.js`
-（2026.11.3.1）的逐行移植，函数、常量、注释和顺序都跟原版一致，原版的一处 diff 可以直接对到这里：
+（2026.11.3.1 移植，到 2026.11.15.1 原版这个文件没有变）的逐行移植，函数、常量、注释和顺序都跟原版一致，原版的一处 diff 可以直接对到这里：
 
 - `downloader.dart`：`Semaphore`、`createDownloader` 的全部内容（分块、对冲副本、续传前缀、重试轮次、
   起播探测、截止时间与排队优先级、任务分配、按序交付）。时钟由外部注入，对应原版的 `performance.now()`。
@@ -226,3 +232,5 @@ mpv 日志先报 `Audio device underrun` 再进入缓冲，与 issue 描述一�
 2026-11-05：真机反馈后台太久回来，先播几秒，然后黑屏转圈、进度 0.0，有「打开失败」的弹窗。原因：iOS 会收回挂起 App 的监听端口（Apple TN2277），代理的本地端口没了，mpv 放完缓冲以后连不上；原版的重试（「视频链接打开失败，重试中」）重开的还是同一个代理地址，每次都失败，而且失败后 mpv 的位置是 0，下一次从 0 开始。改为：回到前台时代理自查（连一次自己的端口），连不上就在原端口重新监听（`BtrRangeProxy.revive`），mpv 手里的地址和每条轨道的状态都不变；原版那处重试改走断流恢复（新地址、新代理），从最后一次正常播放的位置开始。`dart test` 共 113 项通过（新增 2 项，`revive` 不重新监听时新测试失败）。尚未在真机上验证。
 
 2026-11-05（续）：5839 真机日志里，一次回来「已在原端口重新监听」成功，另一次（离开 107 秒）「加速代理恢复失败」，失败原因被吞掉了。代码里旧端口的关闭没有等完成就去绑定同一端口；Dart 的 socket 是异步关闭的，端口可能还没放出来，绑定就会偶尔失败。改为：先等旧 socket 关完（最多 1 秒），绑定失败再隔 250 毫秒重试，共 5 次；仍然失败时把错误写进「后台切换」日志。自查也从「端口能连上」改成「请求一个只有本代理知道的地址（带令牌）并得到 204」，端口被别的东西占着时不会误判为正常。`dart test` 共 115 项通过（新增 2 项；把重试改回 1 次时「端口被占一会儿」那项失败）。尚未在真机上验证。
+
+2026-11-18：同步上游 2026.11.15.1（上游提交 `ef014b270`；Canary 2026.11.18.1，`a41a7a506`，结果相同）。上游这两个版本之间 `idm-downloader.js`、`cdn-resolver.js` 没有任何改动，`range-core.js` 只改了网页端的设置。用这两个版本各重新生成一遍对照数据（`btr_traces.json`、`ripper_resolver.json`、`ripper_candidates.json`、`ripper_assignments.json`、`ripper_auto.json`），与仓库里的逐字节相同，所以移植的代码不用改，只更新了文件头和设置页里写的上游版本号。`packages/thread_ripper` 下 `dart test` 共 132 项通过，`dart analyze` 无问题。上游新增的「音频加速」开关没有同步（见文首）。

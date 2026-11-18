@@ -1,4 +1,4 @@
-// Port of Bilibili-thread-ripper src/range-core.js (2026.11.3.1), MIT.
+// Port of Bilibili-thread-ripper src/range-core.js (2026.11.15.1), MIT.
 // Only the parts the downloader uses; the media-address checks live in
 // cdn_resolver.dart.
 import 'dart:typed_data';

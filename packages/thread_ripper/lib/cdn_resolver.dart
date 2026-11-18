@@ -1,4 +1,4 @@
-// Adapted from Bilibili-thread-ripper src/cdn-resolver.js (2026.11.3.1), MIT.
+// Adapted from Bilibili-thread-ripper src/cdn-resolver.js (2026.11.15.1), MIT.
 // See docs/thread-ripper.md and docs/licenses/bilibili-thread-ripper.txt.
 import 'dart:math';
 

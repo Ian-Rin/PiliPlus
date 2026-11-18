@@ -1,4 +1,4 @@
-// Port of Bilibili-thread-ripper src/idm-downloader.js (2026.11.3.1), MIT.
+// Port of Bilibili-thread-ripper src/idm-downloader.js (2026.11.15.1), MIT.
 // See docs/licenses/bilibili-thread-ripper.txt.
 //
 // Kept line for line with upstream: names, order, constants and comments
