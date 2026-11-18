@@ -960,6 +960,29 @@ void main() {
     }
   }, timeout: const Timeout(Duration(seconds: 60)));
 
+  // The app leaves the foreground, or comes back: what stood still with it
+  // is not measured.
+  test('runs the app breaks off give no speed', () async {
+    source = Uint8List.fromList(
+      List.generate(5 * 1024 * 1024 + 70000, (i) => (i * 37) % 251),
+    );
+    final flatOut = <int>[];
+    proxy.onSpeed = (kbps, {required sustained}) {
+      if (sustained) flatOut.add(kbps);
+    };
+    final breaks = Timer.periodic(
+      const Duration(seconds: 1),
+      (_) => proxy.breakSpeedRuns(),
+    );
+    try {
+      final result = await fetch(register(['/pace']));
+      expect(result.$2, source);
+    } finally {
+      breaks.cancel();
+    }
+    expect(flatOut, isEmpty);
+  }, timeout: const Timeout(Duration(seconds: 60)));
+
   test('a fast node says only the least it does', () async {
     source = Uint8List.fromList(
       List.generate(7 * 1024 * 1024, (i) => (i * 37) % 251),

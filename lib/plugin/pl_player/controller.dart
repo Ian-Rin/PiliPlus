@@ -787,6 +787,11 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
   /// more than two seconds away ([_reseedDecoder]), and the trip logged
   /// ([_bgTrace]) with mpv's video state at a few moments.
   void onAppLifecycle(AppLifecycleState state) {
+    // On every platform: see [_noteRipperSpeed].
+    _ripperProxy?.breakSpeedRuns();
+    if (state != .paused) {
+      _speedQuietUntil = DateTime.now().add(const Duration(seconds: 15));
+    }
     if (!Platform.isIOS) return;
     final player = _videoPlayerController;
     if (state == .paused) {
@@ -1648,7 +1653,23 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
         )
         ..onGaveUp = _noteProxyGaveUp
         // What the connection does, for the quality the next video starts on.
-        ..onSpeed = RipperSpeed.note;
+        ..onSpeed = _noteRipperSpeed;
+
+  DateTime _speedQuietUntil = DateTime(0);
+
+  /// Not from the background, and not right after it. There a download
+  /// stands still with the app (suspended, its sockets taken back by iOS),
+  /// and the window it was on ends minutes later, or after the connections
+  /// have been found dead and opened again: read as the connection's speed,
+  /// that would be a few kbit/s, and the next video would start on its
+  /// lowest quality. The proxy lets go of what it was measuring at each
+  /// such moment as well ([BtrRangeProxy.breakSpeedRuns]).
+  void _noteRipperSpeed(int kbps, {required bool sustained}) {
+    final state = WidgetsBinding.instance.lifecycleState;
+    if (state != null && state != AppLifecycleState.resumed) return;
+    if (sustained && DateTime.now().isBefore(_speedQuietUntil)) return;
+    RipperSpeed.note(kbps, sustained: sustained);
+  }
 
   DateTime _proxyGaveUpAt = DateTime(0);
 

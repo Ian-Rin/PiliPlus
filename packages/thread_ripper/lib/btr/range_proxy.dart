@@ -236,6 +236,12 @@ class BtrRangeProxy {
   /// speed, the least it does.
   void Function(int kbps, {required bool sustained})? onSpeed;
 
+  /// What is being measured for [onSpeed] is let go: the app left the
+  /// foreground or came back, and a download that stood still with it is
+  /// not the connection's doing.
+  void breakSpeedRuns() => _speedEpoch++;
+  int _speedEpoch = 0;
+
   /// A request of mpv's that could not be served to its end: mpv sees its
   /// stream cut short ("Stream ends prematurely") or a 502, and nothing
   /// said why. Which track, how far it got and the error, without addresses.
@@ -932,6 +938,7 @@ class BtrRangeProxy {
             ? RipperSpeedMeter()
             : null;
         var windows = 0;
+        var epoch = _speedEpoch;
         // Headers go out with the first bytes, so a request that fails before
         // any arrive is a 502, not a stream cut short.
         _handedOver[job] = null;
@@ -1043,6 +1050,10 @@ class BtrRangeProxy {
           } catch (_) {
             track.warmEnd = 0;
             rethrow;
+          }
+          if (epoch != _speedEpoch) {
+            epoch = _speedEpoch;
+            meter?.reset();
           }
           // Not a request's first window: its time is the nodes' answers.
           if (meter?.window(

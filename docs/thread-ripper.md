@@ -243,3 +243,5 @@ mpv 日志先报 `Audio device underrun` 再进入缓冲，与 issue 描述一�
 2026-11-18：同步上游 2026.11.15.1（上游提交 `ef014b270`；Canary 2026.11.18.1，`a41a7a506`，结果相同）。上游这两个版本之间 `idm-downloader.js`、`cdn-resolver.js` 没有任何改动，`range-core.js` 只改了网页端的设置。用这两个版本各重新生成一遍对照数据（`btr_traces.json`、`ripper_resolver.json`、`ripper_candidates.json`、`ripper_assignments.json`、`ripper_auto.json`），与仓库里的逐字节相同，所以移植的代码不用改，只更新了文件头和设置页里写的上游版本号。`packages/thread_ripper` 下 `dart test` 共 132 项通过，`dart analyze` 无问题。上游新增的「音频加速」开关没有同步（见文首）。
 
 2026-11-18：新增「按网速选起始画质」（见文首）。代理新增 `onSpeed`（`RipperSpeedMeter`），App 侧 `RipperSpeed` 把它记进设置存储，`VideoDetailController._startQuality` 在打开视频时选档。`packages/thread_ripper` 下 `dart test` 共 150 项通过（新增 18 项：测速 5 项、记忆和选档 11 项、代理走本地模拟节点 2 项——每条连接限速 160 KiB/s 时测到链路速度，节点很快时只报下限）。选档接进视频页的部分没有自动测试，真机未验证。
+
+2026-11-18（续）：测速不把 App 不在前台时的停顿算进去。挂起在后台的 App 回来后才下完手上的窗口，几分钟的间隔会被读成几 kbit/s 的网速，下一个视频就会从最低画质开始。三处防护：同一段测量里两个窗口相隔超过 30 秒就重新开始（`RipperSpeedMeter.maxGapMs`，所以低于约 0.56 Mbit/s 的速度不会被测到）；App 离开或回到前台时代理丢掉正在测的这一段（`BtrRangeProxy.breakSpeedRuns`）；App 不在前台时测到的一律不记，回到前台后 15 秒内只记下限、不记会调低网速的那种。`dart test` 共 154 项通过（新增 4 项）。

@@ -51,6 +51,36 @@ void main() {
     expect(meter.window(2 * mib, waited: true, now: 12000), 4194);
   });
 
+  // An app suspended in the background finishes the window it was on when
+  // it comes back: minutes that are not the connection's.
+  test('a window that ends minutes after the one before is no speed', () {
+    final meter = RipperSpeedMeter();
+    expect(meter.window(2 * mib, waited: true, now: 0), isNull);
+    expect(meter.window(2 * mib, waited: true, now: 1000), isNull);
+    // Ten minutes on: not 55 kbit/s, and the run starts over from here.
+    expect(meter.window(2 * mib, waited: true, now: 601000), isNull);
+    expect(meter.window(2 * mib, waited: true, now: 602000), isNull);
+    expect(meter.window(2 * mib, waited: true, now: 604100), 10824);
+  });
+
+  test('half a minute is still the connection', () {
+    final meter = RipperSpeedMeter();
+    expect(meter.window(2 * mib, waited: true, now: 0), isNull);
+    // 2 MiB in 30 s: 0.56 Mbit/s, the slowest that is measured.
+    expect(meter.window(2 * mib, waited: true, now: 30000), 559);
+    expect(meter.window(2 * mib, waited: true, now: 60001), isNull);
+  });
+
+  test('let go of, a run starts with the next window', () {
+    final meter = RipperSpeedMeter();
+    expect(meter.window(2 * mib, waited: true, now: 0), isNull);
+    expect(meter.window(2 * mib, waited: true, now: 2000), isNull);
+    meter.reset();
+    // Would have been 4 MiB in 4 s.
+    expect(meter.window(2 * mib, waited: true, now: 4000), isNull);
+    expect(meter.window(2 * mib, waited: true, now: 7100), 5412);
+  });
+
   test('one window on its own: a least speed, or nothing', () {
     expect(RipperSpeedMeter.burst(2 * mib, 400), 41943);
     // Too small, too quick to say.

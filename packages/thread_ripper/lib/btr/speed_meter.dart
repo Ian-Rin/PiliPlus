@@ -14,6 +14,7 @@ class RipperSpeedMeter {
     this.minMs = 3000,
     this.minBytes = 2 * 1024 * 1024,
     this.restartMs = 8000,
+    this.maxGapMs = 30000,
   });
 
   /// The least a run lasts and brings before it is a measurement: the first
@@ -26,7 +27,16 @@ class RipperSpeedMeter {
   /// last seconds, not of the minutes before them.
   final int restartMs;
 
+  /// Longer than this between two windows of a run, and it was not the
+  /// connection: an app that stood still (suspended in the background, its
+  /// sockets taken away) finishes the window it was on minutes later, and
+  /// a megabyte over those minutes would read as a connection that does a
+  /// few kbit/s. The run starts over. A connection that truly takes this
+  /// long for a window is not measured, and nothing is known of it.
+  final int maxGapMs;
+
   int? _from;
+  int _last = 0;
   int _bytes = 0;
 
   /// A window of [bytes] handed over to its end at [now] (milliseconds, any
@@ -45,11 +55,12 @@ class RipperSpeedMeter {
       _bytes = 0;
       return null;
     }
-    if (from == null) {
-      _from = now;
+    if (from == null || now - _last > maxGapMs) {
+      _from = _last = now;
       _bytes = 0;
       return null;
     }
+    _last = now;
     _bytes += bytes;
     final ms = now - from;
     if (ms < minMs || _bytes < minBytes) return null;
@@ -59,6 +70,12 @@ class RipperSpeedMeter {
       _bytes = 0;
     }
     return kbps;
+  }
+
+  /// What was being measured is let go: the next window starts a run.
+  void reset() {
+    _from = null;
+    _bytes = 0;
   }
 
   /// The speed, in kbit/s, of one window of [bytes] that took [ms] to
