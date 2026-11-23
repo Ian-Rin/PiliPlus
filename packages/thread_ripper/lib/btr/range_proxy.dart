@@ -47,14 +47,18 @@ class BtrRangeProxy {
     this.referer = 'https://www.bilibili.com/',
     this.prefetchHeads = true,
     this.overseasStart = false,
+    this.slowLink = false,
     RipperFetch? fetch,
     HttpClient? client,
-  }) : _client = client ?? newClient(),
+  }) : assert(!slowLink || autoConcurrency == null),
+       _client = client ?? newClient(),
        _ownsClient = client == null,
-       _settings = RipperDownloadSettings(
-         concurrency: concurrency,
-         autoConcurrency: autoConcurrency != null,
-       ) {
+       _settings = slowLink
+           ? RipperDownloadSettings.slowLink(concurrency: concurrency)
+           : RipperDownloadSettings(
+               concurrency: concurrency,
+               autoConcurrency: autoConcurrency != null,
+             ) {
     _downloader = RipperDownloader(
       fetch: _timed(
         fetch ??
@@ -62,8 +66,75 @@ class BtrRangeProxy {
       ),
       getSettings: () => _settings,
       autoConcurrency: autoConcurrency,
+      onTransfer: _noteTransfer,
     );
   }
+
+  int? _bytesAt;
+
+  // What the requests to the CDN did since [takeStats] was last asked: how
+  // many, how they ended, how long each waited for its first byte.
+  var _stats = RipperLinkStats._();
+  int _transferSeq = 0;
+  final _awaitingFirstByte = <int, int>{};
+  int _inFlight = 0;
+  int _silentSince = 0;
+
+  /// The downloader's account of a transfer (a piece asked of a node):
+  /// `start` (answered with the id its later events carry), `progress` at
+  /// every read, then `done`, `error`, or `cancel` for a copy cut off.
+  Object? _noteTransfer(Map<String, Object?> event) {
+    final now = _timingClock.elapsedMilliseconds;
+    switch (event['phase']) {
+      case 'start':
+        final id = ++_transferSeq;
+        _stats.requests++;
+        _awaitingFirstByte[id] = now;
+        if (_inFlight++ == 0) _silentSince = now;
+        return id;
+      case 'progress':
+        _bytesAt = now;
+        _stats.bytes += (event['bytes'] as int?) ?? 0;
+        if (_awaitingFirstByte.remove(event['id']) case final asked?) {
+          if (_stats.firstByteMs.length < RipperLinkStats._kept) {
+            _stats.firstByteMs.add(now - asked);
+          }
+        }
+        if (now - _silentSince > _stats.longestSilenceMs) {
+          _stats.longestSilenceMs = now - _silentSince;
+        }
+        _silentSince = now;
+      case 'done' || 'error' || 'cancel':
+        _awaitingFirstByte.remove(event['id']);
+        if (_inFlight > 0) _inFlight--;
+        switch (event['phase']) {
+          case 'cancel':
+            _stats.canceled++;
+          case 'error':
+            _stats.failed++;
+            if (errorName(event['error']) == 'TimeoutError') _stats.timedOut++;
+        }
+    }
+    return null;
+  }
+
+  /// What the requests to the CDN did since this was last asked (see
+  /// [RipperLinkStats]), for the app's record of a flight.
+  RipperLinkStats takeStats() {
+    final stats = _stats;
+    _stats = RipperLinkStats._();
+    return stats;
+  }
+
+  /// How long ago bytes of a track last came from a CDN; null while none
+  /// have. Tells a link that is gone (nothing comes, whatever is asked)
+  /// from one that is slow: the app's 机上模式 gives the picture up for the
+  /// second, and waits out the first, through which the sound would not
+  /// come either.
+  Duration? get sinceBytes => switch (_bytesAt) {
+    final at? => Duration(milliseconds: _timingClock.elapsedMilliseconds - at),
+    null => null,
+  };
 
   // ---------------------------------------------------------------------
   // What a start's requests took, for [onTrace].
@@ -152,6 +223,12 @@ class BtrRangeProxy {
   /// Whether [register] starts fetching each track's head (its length and
   /// first 64 KiB) at once, before mpv asks for it.
   final bool prefetchHeads;
+
+  /// A link like an airliner's satellite Wi-Fi (the app's 机上模式): the
+  /// downloader's timings for one ([RipperDownloadSettings.slowLink], which
+  /// says what was measured there), and windows a quarter the size
+  /// ([_windowBytes]). No automatic thread count with it.
+  final bool slowLink;
   final RipperDownloadSettings _settings;
   late final RipperDownloader _downloader;
 
@@ -167,8 +244,16 @@ class BtrRangeProxy {
       HttpClient()
         ..autoUncompress = false
         // Upstream's first-byte timeout covers connecting as well.
-        ..connectionTimeout = const Duration(milliseconds: 5500)
+        ..connectionTimeout = connectTimeout(slowLink: false)
         ..idleTimeout = idleTimeout;
+
+  /// How long a client of [newClient] may take to connect: upstream's
+  /// first-byte timeout, and a slow link's ([slowLink]), where a connection
+  /// is three or four round trips of 0.6 s and more, each packet of them
+  /// sent again after one, two and four seconds when it is lost. Set on the
+  /// client a proxy is given (HttpClient.connectionTimeout).
+  static Duration connectTimeout({required bool slowLink}) =>
+      Duration(milliseconds: slowLink ? 15000 : 5500);
 
   /// A CDN keeps an idle connection for about a minute.
   static const _idleKeep = Duration(seconds: 60);
@@ -561,7 +646,7 @@ class BtrRangeProxy {
     var first = true;
     final pieces = <RipperPiece>[];
     do {
-      final size = windowBytes(kind: track.kind, first: first);
+      final size = _windowBytes(kind: track.kind, first: first);
       pieces.add(RipperPiece(0, from, min(total - 1, from + size - 1)));
       from += size;
       first = false;
@@ -642,9 +727,10 @@ class BtrRangeProxy {
         pieces.add(fragment(target - 1));
       }
     } else {
-      // The video's head comes in about when this one does.
+      // The video's head comes in about when this one does (on a slow
+      // link, one of two that share it: seconds apart).
       final key = await _resumeKey?.future.timeout(
-        const Duration(milliseconds: 800),
+        Duration(milliseconds: slowLink ? 5000 : 800),
         onTimeout: () => null,
       );
       if (_closed || !identical(track.head, head)) return false;
@@ -669,7 +755,7 @@ class BtrRangeProxy {
     var from = at;
     for (final first in const [true, false]) {
       if (from >= total) break;
-      final size = windowBytes(kind: track.kind, first: first);
+      final size = _windowBytes(kind: track.kind, first: first);
       pieces.add(RipperPiece(0, from, min(total - 1, from + size - 1)));
       from += size;
     }
@@ -718,7 +804,7 @@ class BtrRangeProxy {
       var from = at;
       for (final first in const [true, false]) {
         if (from >= total) break;
-        final size = windowBytes(kind: audio.kind, first: first);
+        final size = _windowBytes(kind: audio.kind, first: first);
         pieces.add(RipperPiece(0, from, min(total - 1, from + size - 1)));
         from += size;
       }
@@ -803,13 +889,28 @@ class BtrRangeProxy {
   ///   long as a Bilibili audio segment, so the audio does not wait for one
   ///   large piece that shares the link with the video (fork issue #5:
   ///   playback stopped two seconds in, once the head's audio ran out).
-  static int windowBytes({required String kind, required bool first}) =>
-      switch ((kind, first)) {
-        ('audio', true) => 128 * 1024,
-        ('audio', false) => 256 * 1024,
-        (_, true) => 1024 * 1024,
-        (_, false) => 2 * 1024 * 1024,
-      };
+  /// - On a slow link ([slowLink]) a quarter of that, the audio's half. A
+  ///   window's pieces are as many as it has connections, each handed over
+  ///   whole: of 4 connections the video has 2, and its first megabyte was
+  ///   two pieces of 480 KiB, the first picture in the first of them,
+  ///   complete after ten seconds and more at the 50 KiB/s such a link
+  ///   gives a connection. A quarter of a megabyte is 7 s of the lowest
+  ///   quality, and its first piece is there in two.
+  static int windowBytes({
+    required String kind,
+    required bool first,
+    bool slowLink = false,
+  }) => switch ((kind, first)) {
+    // More than the head's 64 KiB: a window no longer than that is not
+    // taken for one the next request carries on from (see [_serve]).
+    ('audio', true) => (slowLink ? 96 : 128) * 1024,
+    ('audio', false) => (slowLink ? 128 : 256) * 1024,
+    (_, true) => (slowLink ? 256 : 1024) * 1024,
+    (_, false) => (slowLink ? 512 : 2048) * 1024,
+  };
+
+  int _windowBytes({required String kind, required bool first}) =>
+      windowBytes(kind: kind, first: first, slowLink: slowLink);
 
   /// Upstream's download() of the compatibility mode, for one window, with
   /// every piece checked against the window and the file. [startup] is
@@ -996,8 +1097,10 @@ class BtrRangeProxy {
         // mpv let bytes it was handed wait: the window they are of took the
         // time mpv gave it, not the download's.
         var heldBack = false;
+        // A slow link's windows are a quarter the size, and so is what a
+        // run has to bring before it is a measurement.
         final meter = track.kind == 'video' && onSpeed != null
-            ? RipperSpeedMeter()
+            ? RipperSpeedMeter(minBytes: (slowLink ? 1 : 2) * 1024 * 1024)
             : null;
         var windows = 0;
         var epoch = _speedEpoch;
@@ -1037,7 +1140,7 @@ class BtrRangeProxy {
         // Short of a window downloaded ahead that starts inside it (mpv
         // began a fragment before the one expected): the next is that one.
         RipperPiece windowAt(int from, {required bool first}) {
-          final size = windowBytes(kind: track.kind, first: first);
+          final size = _windowBytes(kind: track.kind, first: first);
           var last = min(end, from + size - 1);
           if (track.warmForStart && track.warm.isNotEmpty) {
             final ahead = track.warm.first.piece.start;
@@ -1076,7 +1179,11 @@ class BtrRangeProxy {
           final waited = !current.complete;
           if (meter != null && !waited) {
             final took = (current.arrivedAt ?? 0) - current.startedAt;
-            if (RipperSpeedMeter.burst(current.piece.length, took)
+            if (RipperSpeedMeter.burst(
+                  current.piece.length,
+                  took,
+                  least: slowLink ? 256 * 1024 : 1024 * 1024,
+                )
                 case final kbps?) {
               onSpeed?.call(kbps, sustained: false);
             }
@@ -1369,4 +1476,34 @@ class _Window {
     _deliver = deliver;
     await _done;
   }
+}
+
+/// What a proxy's requests to the CDN did over a while
+/// ([BtrRangeProxy.takeStats]): the link, as the downloads saw it.
+class RipperLinkStats {
+  RipperLinkStats._();
+
+  static const _kept = 256;
+
+  /// Pieces asked of a node, copies included.
+  int requests = 0;
+
+  /// Those that failed, [timedOut] among them (no first byte in time, or
+  /// none for a while midway).
+  int failed = 0;
+  int timedOut = 0;
+
+  /// Copies cut off because the other one got there first.
+  int canceled = 0;
+
+  /// Bytes received.
+  int bytes = 0;
+
+  /// From a piece being asked for to its first byte, in milliseconds: a
+  /// round trip on a connection that was open, three or four on a new one.
+  /// The first [_kept] of them.
+  final firstByteMs = <int>[];
+
+  /// The longest that nothing came while something was asked for.
+  int longestSilenceMs = 0;
 }

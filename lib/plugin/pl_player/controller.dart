@@ -42,6 +42,8 @@ import 'package:PiliPlus/utils/extension/box_ext.dart';
 import 'package:PiliPlus/utils/extension/native_geometry_ext.dart';
 import 'package:PiliPlus/utils/extension/num_ext.dart';
 import 'package:PiliPlus/utils/feed_back.dart';
+import 'package:PiliPlus/utils/flight_log.dart';
+import 'package:PiliPlus/utils/flight_mode.dart';
 import 'package:PiliPlus/utils/image_utils.dart';
 import 'package:PiliPlus/utils/ios/pip_helper.dart';
 import 'package:PiliPlus/utils/page_utils.dart';
@@ -72,6 +74,7 @@ import 'package:screen_brightness_platform_interface/screen_brightness_platform_
 import 'package:thread_ripper/auto_concurrency.dart';
 import 'package:thread_ripper/btr/range_proxy.dart';
 import 'package:thread_ripper/cdn_resolver.dart';
+import 'package:thread_ripper/flight_record.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
 import 'package:window_manager/window_manager.dart';
 
@@ -567,7 +570,8 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
 
   late final horizontalSeasonPanel = Pref.horizontalSeasonPanel;
   late final preInitPlayer = Pref.preInitPlayer;
-  late final showRelatedVideo = Pref.showRelatedVideo;
+  // Read each time: 机上模式 turns it off while it is on.
+  bool get showRelatedVideo => Pref.showRelatedVideo;
   late final showVideoReply = Pref.showVideoReply;
   late final showBangumiReply = Pref.showBangumiReply;
   late final reverseFromFirst = Pref.reverseFromFirst;
@@ -836,6 +840,8 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
   void onAppLifecycle(AppLifecycleState state) {
     // On every platform: see [_noteRipperSpeed].
     _ripperProxy?.breakSpeedRuns();
+    if (state == .paused) FlightLog.event('bg');
+    if (state == .resumed) FlightLog.event('fg');
     if (state != .paused) {
       _speedQuietUntil = DateTime.now().add(const Duration(seconds: 15));
     }
@@ -2163,14 +2169,17 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
               ...RipperCdnResolver.mainlandHosts.take(2),
             ],
           };
-    final client = _ripperClient;
+    final flight = FlightMode.on;
+    final client = _ripperClient
+      ..connectionTimeout = BtrRangeProxy.connectTimeout(slowLink: flight);
     for (final host in hosts) {
       () async {
         try {
           final request = await client.headUrl(Uri.https(host, '/'));
           request.headers.set(HttpHeaders.userAgentHeader, BrowserUa.pc);
+          // A handshake over a satellite takes two seconds and more.
           final response = await request.close().timeout(
-            const Duration(seconds: 6),
+            Duration(seconds: flight ? 15 : 6),
           );
           await response.drain<void>();
         } catch (_) {}
@@ -2178,21 +2187,29 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     }
   }
 
-  BtrRangeProxy _newRipperProxy() =>
-      BtrRangeProxy(
-          client: _ripperClient,
-          concurrency: Pref.threadRipperConcurrency,
-          overseas: Pref.threadRipperOverseas,
-          overseasStart: Pref.threadRipperRegion == RipperRegion.auto,
-          customHosts: Pref.threadRipperCustomHosts,
-          autoConcurrency: Pref.threadRipperAutoConcurrency
-              ? _ripperAutoConcurrency
-              : null,
-          userAgent: BrowserUa.pc,
-        )
-        ..onGaveUp = _noteProxyGaveUp
-        // What the connection does, for the quality the next video starts on.
-        ..onSpeed = _noteRipperSpeed;
+  /// 机上模式: four connections whatever is set, none added as it stalls
+  /// (each is a share of the same link, and one more handshake), and the
+  /// proxy's timings for a slow link ([BtrRangeProxy.slowLink]). The nodes
+  /// are those set: where such a link comes out is not known beforehand.
+  BtrRangeProxy _newRipperProxy() {
+    final flight = FlightMode.on;
+    return BtrRangeProxy(
+        client: _ripperClient
+          ..connectionTimeout = BtrRangeProxy.connectTimeout(slowLink: flight),
+        concurrency: flight ? 4 : Pref.threadRipperConcurrency,
+        overseas: Pref.threadRipperOverseas,
+        overseasStart: Pref.threadRipperRegion == RipperRegion.auto,
+        customHosts: Pref.threadRipperCustomHosts,
+        autoConcurrency: !flight && Pref.threadRipperAutoConcurrency
+            ? _ripperAutoConcurrency
+            : null,
+        userAgent: BrowserUa.pc,
+        slowLink: flight,
+      )
+      ..onGaveUp = _noteProxyGaveUp
+      // What the connection does, for the quality the next video starts on.
+      ..onSpeed = _noteRipperSpeed;
+  }
 
   DateTime _speedQuietUntil = DateTime(0);
 
@@ -2206,6 +2223,16 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
   void _noteRipperSpeed(int kbps, {required bool sustained}) {
     final state = WidgetsBinding.instance.lifecycleState;
     if (state != null && state != AppLifecycleState.resumed) return;
+    // 机上模式 keeps its own account of the link (FlightMode.noteSpeed,
+    // for the step above the lowest quality): what the airliner's link did
+    // would start the videos after landing on their lowest quality, for as
+    // long as a speed is kept here.
+    if (FlightMode.on) {
+      if (!(sustained && DateTime.now().isBefore(_speedQuietUntil))) {
+        FlightMode.noteSpeed(kbps);
+      }
+      return;
+    }
     if (sustained && DateTime.now().isBefore(_speedQuietUntil)) return;
     RipperSpeed.note(kbps, sustained: sustained);
     onRipperSpeed?.call(kbps, sustained: sustained);
@@ -2232,6 +2259,7 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     final now = DateTime.now();
     if (now.difference(_proxyGaveUpAt) < const Duration(seconds: 20)) return;
     _proxyGaveUpAt = now;
+    FlightLog.event('gaveup');
     final until = _addressesGoodUntil();
     Utils.reportError(
       '[加速中断] $note'
@@ -2284,20 +2312,41 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
         proxy.close();
         return;
       }
+      // The sound alone plays (听视频): nothing of the next picture either.
+      final soundOnly = onlyPlayAudio.value && audio != null;
+      // 机上模式: more of it (see [_flightAheadSeconds]).
+      final flight = FlightMode.on;
       _nextProxy = (
         proxy: proxy,
         videoCandidates: videoCandidates,
         audioCandidates: audio,
         video: proxy.register(
           videoCandidates,
-          warmBytes: _aheadBytes(videoBitrate, 0x100000, 16 * 0x100000),
+          warmBytes: soundOnly
+              ? 0
+              : _aheadBytes(
+                  videoBitrate,
+                  0x100000,
+                  16 * 0x100000,
+                  flight ? _flightAheadSeconds : _aheadSeconds,
+                ),
+          lazy: soundOnly,
         ),
         audio: audio == null
             ? null
             : proxy.register(
                 audio,
                 isAudio: true,
-                warmBytes: _aheadBytes(audioBitrate, 128 * 1024, 0x100000),
+                warmBytes: _aheadBytes(
+                  audioBitrate,
+                  128 * 1024,
+                  flight ? 4 * 0x100000 : 0x100000,
+                  !flight
+                      ? _aheadSeconds
+                      : soundOnly
+                      ? _flightSoundAheadSeconds
+                      : _flightAheadSeconds,
+                ),
               ),
         at: DateTime.now(),
       );
@@ -2311,9 +2360,28 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
   /// are downloaded ahead, a quarter more for the bitrate's peaks.
   static const _aheadSeconds = 10;
 
-  static int _aheadBytes(int? bitrate, int least, int most) {
+  /// 机上模式: a minute and a half of the next video, and five minutes of
+  /// its sound when the sound alone plays (mpv reads the two in step, so
+  /// sound further on than the picture would not play). The link is idle
+  /// once this video is all downloaded ([_checkNearEnd]), and what it
+  /// brings then is what the next one starts on, and plays through a link
+  /// that is gone at that moment. 4 MiB of the lowest picture, 1 to 3 of
+  /// sound: lost if another video is picked instead.
+  static const _flightAheadSeconds = 90;
+  static const _flightSoundAheadSeconds = 300;
+
+  /// The next video is made ready this long before the end in 机上模式.
+  /// Under [_nextProxyFreshFor], after which it would be let go unused.
+  static const _flightNearEnd = Duration(minutes: 8);
+
+  static int _aheadBytes(
+    int? bitrate,
+    int least,
+    int most, [
+    int seconds = _aheadSeconds,
+  ]) {
     if (bitrate == null || bitrate <= 0) return least;
-    return (bitrate / 8 * _aheadSeconds * 1.25).round().clamp(least, most);
+    return (bitrate / 8 * seconds * 1.25).round().clamp(least, most);
   }
 
   /// The proxy made ahead for [source], if it is the one. Another video (this
@@ -2376,10 +2444,14 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     final duration = state.duration;
     if (duration <= Duration.zero) return;
     final left = duration - position;
-    if (left > const Duration(minutes: 3)) return;
+    // 机上模式: earlier, and only once this video is all downloaded, when
+    // the link has nothing else to do (a share of it taken before would
+    // be taken from this video).
+    final flight = FlightMode.on;
+    if (left > (flight ? _flightNearEnd : const Duration(minutes: 3))) return;
     final ahead = state.buffer - position;
     final healthy =
-        ahead >= const Duration(seconds: 10) ||
+        (!flight && ahead >= const Duration(seconds: 10)) ||
         state.buffer >= duration - const Duration(seconds: 1);
     if (!healthy && left > const Duration(seconds: 20)) return;
     _nearEndDone = true;
@@ -2572,13 +2644,37 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
       // commas of its own goes in mpv's %length% quoting (as audio-files
       // below): unquoted, only reconnect=1 reached ffmpeg, and mpv took the
       // rest for options of its own ("option not found" on every open).
+      // 机上模式: the proxy is silent for as long as the link is gone, and a
+      // piece of a quarter megabyte takes most of a minute at 5 KiB/s. A
+      // read given up after 15 s made ffmpeg ask the proxy again, which
+      // starts the window over and drops what it had of it: a link slower
+      // than that never got a piece through. Four minutes, past the three
+      // the proxy keeps asking for a piece.
       if (dataSource is! FileSource && !isLive) ...{
         'stream-lavf-o': _mpvQuoted(
-          'reconnect=1,reconnect_on_network_error=1,reconnect_delay_max=4',
+          'reconnect=1,reconnect_on_network_error=1,'
+          'reconnect_delay_max=${FlightMode.on ? 30 : 4}',
         ),
-        'network-timeout': '15',
+        'network-timeout': FlightMode.on ? '240' : '15',
+        // Ran dry: four seconds are gathered before it plays on, not one
+        // (the next dry spell is seconds away on such a link).
+        if (FlightMode.on) 'cache-pause-wait': _flightPauseWait,
       },
     };
+
+    // 机上模式: the picture given up lately ([_giveUpPicture]) is not tried
+    // by the next video either, until that has run out; then it is.
+    if (!isLive && dataSource is NetworkSource) {
+      final hasSound =
+          dataSource.audioSource?.isNotEmpty == true &&
+          dataSource.audioCandidates?.isNotEmpty == true;
+      if (FlightMode.soundOnly) {
+        if (hasSound) onlyPlayAudio.value = true;
+      } else if (FlightMode.byFallback) {
+        FlightMode.byFallback = false;
+        onlyPlayAudio.value = false;
+      }
+    }
 
     final generation = ++_ripperGeneration;
     // The proxy of the video before is closed here, before mpv is given the
@@ -2589,6 +2685,7 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     if (_ripperProxy != null) {
       _droppingOldStreamUntil = DateTime.now().add(const Duration(seconds: 5));
     }
+    _takeProxyStats(_ripperProxy);
     _ripperProxy?.close();
     _ripperProxy = null;
     String video = dataSource.videoSource;
@@ -2635,7 +2732,17 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
         // A start away from the beginning (resumed from the history): both
         // tracks download there as soon as their heads are in.
         final startAt = isLive ? null : seekTo;
-        video = proxy.register(dataSource.videoCandidates!, startAt: startAt);
+        // The sound alone (听视频): nothing of the picture is fetched, not
+        // its head either, which the sound would share the link with.
+        final soundOnly =
+            onlyPlayAudio.value &&
+            audioSource?.isNotEmpty == true &&
+            dataSource.audioCandidates?.isNotEmpty == true;
+        video = proxy.register(
+          dataSource.videoCandidates!,
+          startAt: soundOnly ? null : startAt,
+          lazy: soundOnly,
+        );
         if (audioSource?.isNotEmpty == true &&
             dataSource.audioCandidates?.isNotEmpty == true) {
           audioSource = proxy.register(
@@ -2651,6 +2758,13 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
         video = dataSource.videoSource;
         audioSource = dataSource.audioSource;
       }
+    }
+    // 机上模式's long wait is for the proxy, which has its own timeouts and
+    // says when it gives up. Read straight from a CDN (an episode not
+    // through the proxy, a proxy that did not start), a connection that
+    // died without a word would be waited on as long: half a minute.
+    if (FlightMode.on && _ripperProxy == null && !isLive && !isFileSource) {
+      extras['network-timeout'] = '30';
     }
     // Of the file before; set again below if this one has them.
     _qualitiesOf = null;
@@ -2701,6 +2815,7 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     _startup
       ?..label =
           '${_ripperProxy != null ? '线程撕裂者' : '直连'}'
+          '${FlightMode.on ? '，机上模式${onlyPlayAudio.value ? '（只放声音）' : ''}' : ''}'
           '${seekTo != null && seekTo > Duration.zero ? '，从 ${seekTo.inSeconds} 秒开始${fromKeyframe ? '（它前面的关键帧）' : ''}' : ''}'
           '${audioSource?.isNotEmpty == true ? '' : '，无单独音轨'}'
           '${switch (extras['demuxer-max-bytes']) {
@@ -2722,6 +2837,320 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     _droppingOldStreamUntil = DateTime(0);
     // The old picture is hidden by the player from here on.
     stalePicture.value = false;
+    _watchFlightPicture(player);
+    _recordFlight(player);
+  }
+
+  // ---------------------------------------------------------------------
+  // 机上模式 (FlightMode): the sound comes first.
+
+  static const _flightPauseWait = '4.0';
+
+  Timer? _flightWatch;
+
+  /// Seconds playback has waited on the download, a quarter of the time it
+  /// then played taken off again ([FlightMode.pictureWait]).
+  double _flightWaited = 0;
+
+  /// Seconds of waiting that were not added to it: the link was gone.
+  int _flightGone = 0;
+
+  /// Set by the video page (VideoDetailController.flightStepDown): a video
+  /// that started a step above its lowest quality is opened again on the
+  /// lowest, at [position]. False if it was not raised.
+  bool Function(Duration position)? onFlightStepDown;
+  bool _flightDownAsked = false;
+  double? _flightCarried;
+
+  /// Nothing of any track has come from a CDN for five seconds (or ever,
+  /// for this video): on a link that is slow, bytes keep coming. Unknown
+  /// without the proxy, and the link is then taken to be there.
+  bool get _flightLinkGone {
+    final proxy = _ripperProxy;
+    if (proxy == null) return false;
+    final since = proxy.sinceBytes;
+    return since == null || since >= const Duration(seconds: 5);
+  }
+
+  /// Set by the video page: opens the video again at [position], as it is
+  /// now set to play (with its sound alone, here), on the addresses it has.
+  Future<void>? Function(Duration position)? onReopenHere;
+
+  /// mpv reads a video's two tracks in step, the one that is behind first:
+  /// a picture the link does not carry keeps the sound waiting too, however
+  /// little the sound needs (8 KiB/s against the picture's 30 and more).
+  /// While a video plays with its picture in 机上模式, the time playback
+  /// spends waiting on the download is added up, every second: the wait
+  /// for its first picture, and every spinner after it. Too much of it
+  /// ([FlightMode.pictureWait]), and the picture is given up
+  /// ([_giveUpPicture]).
+  void _watchFlightPicture(Player player) {
+    _flightWatch?.cancel();
+    _flightWatch = null;
+    // Opened again on its lowest quality ([onFlightStepDown]): the wait so
+    // far is the picture's still.
+    _flightWaited = _flightCarried ?? 0;
+    _flightCarried = null;
+    _flightDownAsked = false;
+    _flightGone = 0;
+    final source = dataSource;
+    if (!FlightMode.on ||
+        isLive ||
+        source is! NetworkSource ||
+        onlyPlayAudio.value ||
+        source.audioSource?.isNotEmpty != true) {
+      return;
+    }
+    _flightWatch = Timer.periodic(const Duration(seconds: 1), (timer) {
+      if (!identical(_videoPlayerController, player) ||
+          !identical(dataSource, source) ||
+          !FlightMode.on ||
+          onlyPlayAudio.value) {
+        timer.cancel();
+        return;
+      }
+      // Away, nothing is waited for (and nothing downloads, on iOS).
+      final state = WidgetsBinding.instance.lifecycleState;
+      if (state != null && state != AppLifecycleState.resumed) return;
+      final waiting = player.state.playing && player.state.buffering;
+      // Waiting with nothing arriving at all: the link is gone, and the
+      // sound would not come through it either. Not held against the
+      // picture, which the link may well carry when it is back.
+      if (waiting && _flightLinkGone) {
+        _flightGone++;
+        return;
+      }
+      _flightWaited = waiting
+          ? _flightWaited + 1
+          : max(0.0, _flightWaited - 0.25);
+      // A video that was raised a step is first put back on its lowest
+      // quality, at half the wait: once, and what it has waited so far
+      // counts on for the picture.
+      if (_flightWaited >= FlightMode.raisedWait && !_flightDownAsked) {
+        _flightDownAsked = true;
+        if (onFlightStepDown?.call(_lastGoodPosition) ?? false) {
+          timer.cancel();
+          _flightCarried = _flightWaited;
+          FlightMode.raiseFailed();
+          FlightLog.event('down', {'wait': _flightWaited.round()});
+          Utils.reportError(
+            '[机上模式] 升的一档带不动，退回最低画质：等了 '
+            '${_flightWaited.toStringAsFixed(0)} 秒，'
+            '位置 ${_seconds(_lastGoodPosition)}，'
+            '已缓冲到 ${_seconds(player.state.buffer)}',
+          );
+          SmartDialog.showToast(
+            '网速带不动这一档，退回最低画质',
+            displayTime: const Duration(seconds: 3),
+          );
+          return;
+        }
+      }
+      if (_flightWaited >= FlightMode.pictureWait &&
+          FlightMode.mayGiveUpPicture) {
+        timer.cancel();
+        _giveUpPicture(player);
+      }
+    });
+  }
+
+  /// The video is opened again with its sound alone, where it was: the
+  /// sound's track only, so that nothing of the picture is read or fetched
+  /// (turning the picture's track off would leave mpv in the read it is
+  /// waiting in). Said to the viewer, who has the picture back with 听视频
+  /// in the player's menu; the next video tries it again once
+  /// [FlightMode.soundOnlyFor] has passed.
+  void _giveUpPicture(Player player) {
+    final position = _lastGoodPosition;
+    Utils.reportError(
+      '[机上模式] 画面带不动，改为只放声音：等了 ${_flightWaited.toStringAsFixed(0)} 秒'
+      '${_flightGone == 0 ? '' : '（另有 $_flightGone 秒断网，不算）'}，'
+      '位置 ${_seconds(position)}，已缓冲到 ${_seconds(player.state.buffer)}，'
+      '${_ripperProxy == null ? '直连' : '线程撕裂者 ${_ripperProxy!.concurrency} 线程'}',
+    );
+    FlightMode.giveUpPicture();
+    FlightLog.event('giveup', {
+      'wait': _flightWaited.round(),
+      'gone': _flightGone,
+    });
+    onlyPlayAudio.value = true;
+    SmartDialog.showToast(
+      '网速带不动画面，先只放声音\n'
+      '（${FlightMode.soundOnlyFor.inMinutes} 分钟后的视频再试画面；'
+      '想现在要画面，在播放器菜单里关掉「听视频」）',
+      displayTime: const Duration(seconds: 5),
+    );
+    if (onReopenHere case final reopen?) {
+      reopen(position);
+    } else {
+      try {
+        player.setProperty('file-local-options/vid', 'no');
+      } catch (_) {}
+    }
+  }
+
+  // ---------------------------------------------------------------------
+  // 机上模式's record (FlightLog): what this video's playback and its proxy
+  // did, for the mode's figures to be set by after the flight. Looks only;
+  // nothing here changes what plays.
+
+  Timer? _flightSampler;
+  final _flightClock = Stopwatch()..start();
+  int _flightTick = 0;
+
+  /// The video has played since it was opened: its first wait is its
+  /// start (written as `first`), the ones after it are stalls.
+  bool _flightPlayed = false;
+  int? _flightStallAt;
+  int _flightStallGone = 0;
+  bool _flightStallSeek = false;
+
+  // The proxy's requests, taken every ten seconds, written every minute.
+  int _pxRequests = 0;
+  int _pxFailed = 0;
+  int _pxTimedOut = 0;
+  int _pxCanceled = 0;
+  int _pxBytes = 0;
+  int _pxSilence = 0;
+  final _pxFirstByte = <int>[];
+
+  /// The last video played from the network, for the network test
+  /// (FlightProbe): its speed is measured on what a video is fetched from.
+  static ({List<String> urls, DateTime at})? flightProbeTarget;
+
+  /// A video was opened: a line for it, then one every ten seconds, and
+  /// one for every wait on the download.
+  void _recordFlight(Player player) {
+    _flightSampler?.cancel();
+    _flightSampler = null;
+    final source = dataSource;
+    if (isLive || source is! NetworkSource) return;
+    if (source.videoCandidates case final urls? when urls.isNotEmpty) {
+      flightProbeTarget = (urls: List.of(urls), at: DateTime.now());
+    }
+    if (!FlightLog.recording) return;
+    FlightLog.add('open', {
+      'q': source.videoQuality,
+      'so': onlyPlayAudio.value,
+      'px': _ripperProxy != null,
+      'kb': (source.bitrate ?? 0) ~/ 1000,
+    });
+    _flightTick = 0;
+    _flightPlayed = false;
+    _flightStallAt = null;
+    _flightSampler = Timer.periodic(const Duration(seconds: 1), (timer) {
+      if (!identical(_videoPlayerController, player) ||
+          !identical(dataSource, source) ||
+          !FlightLog.recording) {
+        timer.cancel();
+        return;
+      }
+      try {
+        _sampleFlight(player);
+      } catch (_) {}
+    });
+  }
+
+  void _sampleFlight(Player player) {
+    // Away, nothing is known of the link (and nothing downloads, on iOS):
+    // a wait that was under way is not one of the link's.
+    final lifecycle = WidgetsBinding.instance.lifecycleState;
+    if (lifecycle != null && lifecycle != AppLifecycleState.resumed) {
+      _flightStallAt = null;
+      return;
+    }
+    final state = player.state;
+    final proxy = _ripperProxy;
+    final waiting = state.playing && state.buffering;
+    final gone = proxy?.sinceBytes?.inSeconds;
+
+    if (!waiting) {
+      if (state.playing && !_flightPlayed) {
+        _flightPlayed = true;
+        // With its sound alone too, which has no first picture to time
+        // (`first`): from the video being set, to the second.
+        if (_startup case final trace?) {
+          FlightLog.add('play', {'ms': trace.elapsed + trace.before});
+        }
+      }
+      if (_flightStallAt case final from?) {
+        _flightStallAt = null;
+        FlightLog.add(_flightStallSeek ? 'seek' : 'stall', {
+          'ms': _flightClock.elapsedMilliseconds - from,
+          'gone': _flightStallGone,
+          'pos': state.position.inSeconds,
+        });
+      }
+    } else if (_flightPlayed) {
+      if (_flightStallAt == null) {
+        _flightStallAt = _flightClock.elapsedMilliseconds;
+        _flightStallGone = 0;
+        // Within two seconds of a seek: the viewer's doing.
+        _flightStallSeek =
+            DateTime.now().difference(_appMovedAt) < const Duration(seconds: 2);
+      }
+      if (_flightLinkGone) _flightStallGone++;
+    }
+
+    if (++_flightTick % 10 != 0) return;
+    var rx = 0;
+    if (proxy != null) {
+      final stats = proxy.takeStats();
+      rx = stats.bytes * 8 ~/ 10000;
+      _gatherProxyStats(stats);
+    }
+    // A paused video with its cache full says the same thing every time.
+    if (state.playing || rx > 0) {
+      final ahead = (state.buffer - state.position).inSeconds;
+      FlightLog.add('s', {
+        'pos': state.position.inSeconds,
+        'buf': ahead < 0 ? 0 : ahead,
+        'w': waiting,
+        'idle': proxy?.playerIdle ?? true,
+        'rx': rx,
+        'gone': gone ?? -1,
+      });
+    }
+    if (_flightTick % 60 == 0) _writeProxyStats();
+  }
+
+  void _gatherProxyStats(RipperLinkStats stats) {
+    _pxRequests += stats.requests;
+    _pxFailed += stats.failed;
+    _pxTimedOut += stats.timedOut;
+    _pxCanceled += stats.canceled;
+    _pxBytes += stats.bytes;
+    if (stats.longestSilenceMs > _pxSilence) {
+      _pxSilence = stats.longestSilenceMs;
+    }
+    if (_pxFirstByte.length < 512) _pxFirstByte.addAll(stats.firstByteMs);
+  }
+
+  /// The proxy's requests since this was last written: a line, if any.
+  void _writeProxyStats() {
+    if (_pxRequests > 0) {
+      FlightLog.add('px', {
+        'req': _pxRequests,
+        'err': _pxFailed,
+        'to': _pxTimedOut,
+        'cut': _pxCanceled,
+        'fb': FlightRecord.spread(_pxFirstByte),
+        'sil': _pxSilence,
+        'kb': _pxBytes ~/ 1024,
+      });
+    }
+    _pxRequests = _pxFailed = _pxTimedOut = _pxCanceled = 0;
+    _pxBytes = _pxSilence = 0;
+    _pxFirstByte.clear();
+  }
+
+  /// A proxy is about to be closed: what its requests did is taken first.
+  void _takeProxyStats(BtrRangeProxy? proxy) {
+    if (proxy == null || !FlightLog.recording) return;
+    try {
+      _gatherProxyStats(proxy.takeStats());
+      _writeProxyStats();
+    } catch (_) {}
   }
 
   /// From the old proxy's close to mpv taking the new file: what mpv says of
@@ -2808,6 +3237,10 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
       ..mark('画面开始走 ${position.inMilliseconds}ms')
       ..done = true;
     _ripperProxy?.onTrace = null;
+    FlightLog.add('first', {
+      'ms': trace.elapsed + trace.before,
+      'open': trace.elapsed,
+    });
     if (trace.elapsed + trace.before >= 2500) Utils.reportError(trace.report);
     _checkShown(trace);
   }
@@ -3042,6 +3475,24 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     Duration(seconds: 5),
   ];
 
+  // 机上模式: a link that is gone comes back in seconds to minutes, and a
+  // video left alone after ten seconds stayed dead until it was opened
+  // again by hand. Some four minutes of tries at one place.
+  static const _flightBreakOffRetries = [
+    Duration.zero,
+    Duration(seconds: 3),
+    Duration(seconds: 6),
+    Duration(seconds: 10),
+    Duration(seconds: 15),
+    Duration(seconds: 20),
+    Duration(seconds: 20),
+    Duration(seconds: 30),
+    Duration(seconds: 30),
+    Duration(seconds: 30),
+    Duration(seconds: 30),
+    Duration(seconds: 30),
+  ];
+
   // The playhead as mpv last reported it, and when and where the app last
   // moved it (a seek, a file opened at a start position).
   Duration _reportedPosition = Duration.zero;
@@ -3059,6 +3510,8 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     _reportedPosition = to;
     _jumpToEnd = null;
     _lastGoodPosition = to;
+    // A seek's own wait is not the picture's doing ([_watchFlightPicture]).
+    _flightWaited = 0;
   }
 
   /// How far before [_appMovedTo] the playhead may land: a video resumed
@@ -3210,27 +3663,36 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
   /// damaged file cannot loop. Returns whether it reopens.
   bool _recoverStream(Duration position) {
     final now = DateTime.now();
+    final flight = FlightMode.on;
+    final retries = flight ? _flightBreakOffRetries : _breakOffRetries;
     final again = switch (_lastBreakOff) {
+      // 机上模式's tries are up to half a minute apart, and each takes its
+      // own time to fail.
       final last? =>
-        now.difference(last.at) < const Duration(minutes: 1) &&
+        now.difference(last.at) < Duration(minutes: flight ? 3 : 1) &&
             (position.inSeconds - last.position).abs() <= 5,
       null => false,
     };
     final count = again ? _lastBreakOff!.count + 1 : 1;
-    if (count > _breakOffRetries.length) {
+    if (count > retries.length) {
       _lastBreakOff = null;
+      if (flight) {
+        SmartDialog.showToast(
+          '网络一直没有回来，先停在这里；网络恢复后点播放或重新进入视频',
+          displayTime: const Duration(seconds: 4),
+        );
+      }
       return false;
     }
     _lastBreakOff = (position: position.inSeconds, at: now, count: count);
+    FlightLog.event('broke', {'pos': position.inSeconds, 'try': count});
     SmartDialog.showToast(
-      count == 1
-          ? '视频连接中断，正在恢复'
-          : '视频连接中断，正在重试（$count/${_breakOffRetries.length}）',
+      count == 1 ? '视频连接中断，正在恢复' : '视频连接中断，正在重试（$count/${retries.length}）',
       displayTime: const Duration(milliseconds: 800),
     );
     // Not if another video (or none) is playing by then.
     final generation = _ripperGeneration;
-    Future.delayed(_breakOffRetries[count - 1], () {
+    Future.delayed(retries[count - 1], () {
       if (generation != _ripperGeneration || _playerCount == 0) return;
       if (onStreamBrokeOff case final reopen?) {
         reopen(position);
@@ -3682,8 +4144,10 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
         speed,
         source is NetworkSource ? source.bitrate : null,
       ),
-      'cache-pause-wait': (speed > 1 ? (2 * speed).clamp(1.0, 6.0) : 1.0)
-          .toStringAsFixed(1),
+      // 机上模式's is longer than any of these (see [_createVideoController]).
+      'cache-pause-wait': FlightMode.on
+          ? _flightPauseWait
+          : (speed > 1 ? (2 * speed).clamp(1.0, 6.0) : 1.0).toStringAsFixed(1),
     }..remove('cache');
     for (final MapEntry(:key, :value) in options.entries) {
       try {
@@ -4453,6 +4917,8 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     _expiryWatch?.cancel();
     _expiryWatch = null;
     _ripperGeneration++;
+    _takeProxyStats(_ripperProxy);
+    FlightLog.flush();
     _ripperProxy?.close();
     _ripperProxy = null;
     if (removeSafeArea) {
@@ -4464,6 +4930,12 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     setPlayCallBack(null);
     _dropNextProxy();
     onNearEnd = null;
+    _flightWatch?.cancel();
+    _flightWatch = null;
+    _flightSampler?.cancel();
+    _flightSampler = null;
+    onReopenHere = null;
+    onFlightStepDown = null;
     dmState.clear();
     if (showSeekPreview) {
       _clearPreview();
@@ -4577,6 +5049,8 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
   }
 
   Future<void> getVideoShot() async {
+    // Not in 机上模式: sheets of pictures, of the link the video needs.
+    if (FlightMode.on) return;
     videoShot = await VideoHttp.videoshot(bvid: bvid, cid: cid!);
   }
 

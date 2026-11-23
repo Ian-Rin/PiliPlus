@@ -259,10 +259,16 @@ List<Map<String, Object?>> runScenario(Map<String, Object?> scenario) {
     }
 
     final rawSettings = _object(scenario['settings']);
-    final settings = RipperDownloadSettings(
-      concurrency: rawSettings['concurrency']! as int,
-      autoConcurrency: rawSettings['autoConcurrency'] == true,
-    );
+    // slowLink: not upstream's (RipperDownloadSettings.slowLink), so no
+    // scenario with an upstream trace has it.
+    final settings = rawSettings['slowLink'] == true
+        ? RipperDownloadSettings.slowLink(
+            concurrency: rawSettings['concurrency']! as int,
+          )
+        : RipperDownloadSettings(
+            concurrency: rawSettings['concurrency']! as int,
+            autoConcurrency: rawSettings['autoConcurrency'] == true,
+          );
     final auto = RipperAutoConcurrency(now: () => async.elapsed.inMilliseconds);
     final downloader = RipperDownloader(
       fetch: fetch,

@@ -106,13 +106,19 @@ class RetryInterceptor extends Interceptor {
         case DioExceptionType.sendTimeout:
         case DioExceptionType.unknown:
           NetworkErrorLog._note(err);
-          if ((err.requestOptions.extra['_rt'] ??= 0) < _count &&
+          // 机上模式: a satellite link is gone for seconds at a time, and
+          // two tries half a second and a second later were both inside one
+          // such gap. Five, 1.5 s further apart each time (22 s of pauses).
+          final flight = Pref.flightMode;
+          final count = flight && _count < 5 ? 5 : _count;
+          final delay = flight && _delay < 1500 ? 1500 : _delay;
+          if ((err.requestOptions.extra['_rt'] ??= 0) < count &&
               err.error
                   is! TransportConnectionException // 网络中断, 此时请求可能已经被服务器所接收
                   ) {
             Timer(
               Duration(
-                milliseconds: ++err.requestOptions.extra['_rt'] * _delay,
+                milliseconds: ++err.requestOptions.extra['_rt'] * delay,
               ),
               () => _client
                   .fetch(err.requestOptions)

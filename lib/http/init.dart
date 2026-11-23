@@ -4,6 +4,7 @@ import 'dart:io';
 
 import 'package:PiliPlus/http/api.dart';
 import 'package:PiliPlus/http/constants.dart';
+import 'package:PiliPlus/http/flight_interceptor.dart';
 import 'package:PiliPlus/http/loading_state.dart';
 import 'package:PiliPlus/http/retry_interceptor.dart';
 import 'package:PiliPlus/http/user.dart';
@@ -212,6 +213,26 @@ class Request {
     } catch (_) {}
   }
 
+  /// How long a request may take to connect, and to bring its next bytes.
+  /// 机上模式: a satellite link's connection alone is three or four round
+  /// trips of 0.6 s and more, each packet lost sent again seconds later,
+  /// and ten seconds ended requests that were on their way.
+  static Duration _timeout(bool flightMode) =>
+      Duration(milliseconds: flightMode ? 30000 : 10000);
+
+  /// 机上模式 was switched: the requests from here on have its timeouts,
+  /// or the usual ones again.
+  static void applyFlightMode() {
+    // Made, if it was not yet.
+    Request();
+    final timeout = _timeout(Pref.flightMode);
+    for (final client in {dio, ?_http11Dio}) {
+      client.options
+        ..connectTimeout = timeout
+        ..receiveTimeout = timeout;
+    }
+  }
+
   /*
    * config it and create
    */
@@ -221,9 +242,9 @@ class Request {
       //请求基地址,可以包含子路径
       baseUrl: HttpString.apiBaseUrl,
       //连接服务器超时时间，单位是毫秒.
-      connectTimeout: const Duration(milliseconds: 10000),
+      connectTimeout: _timeout(Pref.flightMode),
       //响应流上前后两次接受到数据的间隔，单位为毫秒。
-      receiveTimeout: const Duration(milliseconds: 10000),
+      receiveTimeout: _timeout(Pref.flightMode),
       //Http请求头.
       headers: {
         'user-agent': 'Dart/3.6 (dart:io)', // Http2Adapter不会自动添加标头
@@ -240,6 +261,10 @@ class Request {
       ..httpClientAdapter = _enableHttp2
           ? Http2Adapter(connectionManager, fallbackAdapter: h11)
           : h11;
+
+    // 机上模式's record of what each try took (FlightLog), before the
+    // retries: idle while that is off.
+    dio.interceptors.add(FlightInterceptor());
 
     // 先于其他Interceptor
     if (Pref.retryCount != 0) {

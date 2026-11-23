@@ -16,6 +16,7 @@ import 'package:PiliPlus/services/account_service.dart';
 import 'package:PiliPlus/utils/extension/get_ext.dart';
 import 'package:PiliPlus/utils/extension/iterable_ext.dart';
 import 'package:PiliPlus/utils/feed_back.dart';
+import 'package:PiliPlus/utils/flight_log.dart';
 import 'package:PiliPlus/utils/storage.dart';
 import 'package:PiliPlus/utils/storage_key.dart';
 import 'package:PiliPlus/utils/storage_pref.dart';
@@ -72,9 +73,12 @@ class MainController extends GetxController
   @override
   void onInit() {
     super.onInit();
-    if (Pref.autoUpdate) {
+    // Not in 机上模式: nothing it finds can be downloaded there.
+    if (Pref.autoUpdate && !Pref.flightMode) {
       Update.checkUpdate();
     }
+    // 机上模式's record of the link goes on from where the app is started.
+    FlightLog.sync();
 
     setNavBarConfig();
 

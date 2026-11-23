@@ -2,11 +2,13 @@ import 'dart:io' show Platform;
 
 import 'package:PiliPlus/common/widgets/custom_icon.dart';
 import 'package:PiliPlus/common/widgets/image_grid/image_grid_view.dart';
+import 'package:PiliPlus/http/init.dart';
 import 'package:PiliPlus/models/common/audio_normalization.dart';
 import 'package:PiliPlus/models/common/super_chat_type.dart';
 import 'package:PiliPlus/models/common/super_resolution_type.dart';
 import 'package:PiliPlus/models/common/video/subtitle_pref_type.dart';
 import 'package:PiliPlus/pages/setting/models/model.dart';
+import 'package:PiliPlus/pages/setting/pages/flight_log.dart';
 import 'package:PiliPlus/pages/setting/pages/fullscreen_sc.dart';
 import 'package:PiliPlus/pages/setting/widgets/select_dialog.dart';
 import 'package:PiliPlus/pages/setting/widgets/slider_dialog.dart';
@@ -17,6 +19,8 @@ import 'package:PiliPlus/services/service_locator.dart';
 import 'package:PiliPlus/utils/android/android_helper.dart';
 import 'package:PiliPlus/utils/desktop/window_controller.dart';
 import 'package:PiliPlus/utils/extension/num_ext.dart';
+import 'package:PiliPlus/utils/flight_log.dart';
+import 'package:PiliPlus/utils/flight_mode.dart';
 import 'package:PiliPlus/utils/ios/pip_helper.dart';
 import 'package:PiliPlus/utils/platform_utils.dart';
 import 'package:PiliPlus/utils/storage.dart';
@@ -29,6 +33,54 @@ import 'package:material_design_icons_flutter/material_design_icons_flutter.dart
 import 'package:material_ui/material_ui.dart';
 
 List<SettingsModel> get playSettings => [
+  // What it changes: FlightMode.
+  SwitchModel(
+    title: '机上模式',
+    subtitle:
+        '给飞机卫星 Wi-Fi 这类又慢又断的网络：最低画质和 64K 音质起播，'
+        '提前缓冲十分钟，断网一直等到恢复，画面带不动时自动只放声音。'
+        '下飞机后记得关掉',
+    leading: const Icon(Icons.flight_outlined),
+    setKey: SettingBoxKey.flightMode,
+    defaultVal: false,
+    onChanged: (val) {
+      // Before the record stops with the mode, after it starts with it.
+      if (!val) FlightLog.event('off');
+      FlightMode.reset();
+      Request.applyFlightMode();
+      FlightLog.sync();
+      if (val) FlightLog.event('on');
+      SmartDialog.showToast(
+        val ? '机上模式已开，从下一个视频起生效' : '机上模式已关，从下一个视频起恢复原来的画质',
+      );
+    },
+  ),
+  // FlightMode.carries.
+  const SwitchModel(
+    title: '机上模式：网速好时升一档画质',
+    subtitle:
+        '最近十分钟测到的网速是高一档画质码率的三倍以上，下一个视频就从高一档起播；'
+        '带不动会当场退回最低画质，十分钟内不再升。画质高一档，流量约多一倍，'
+        '套餐有流量上限时可以关掉',
+    leading: Icon(Icons.hd_outlined),
+    setKey: SettingBoxKey.flightRaiseQuality,
+    defaultVal: true,
+  ),
+  // FlightLog.
+  SwitchModel(
+    title: '机上模式：记录测量数据',
+    subtitle: '机上模式开着时记下网络和播放的情况，只存在手机里，用来以后调这个模式的参数',
+    leading: const Icon(Icons.query_stats_outlined),
+    setKey: SettingBoxKey.flightMeasure,
+    defaultVal: true,
+    onChanged: (_) => FlightLog.sync(),
+  ),
+  NormalModel(
+    onTap: (context, setState) => Get.to(const FlightLogPage()),
+    leading: const Icon(Icons.network_check_outlined),
+    title: '机上测量',
+    subtitle: '看记录的汇总、测一下网络、把记录发出来',
+  ),
   NormalModel(
     onTap: (context, setState) => Get.toNamed('/playSpeedSet'),
     leading: const Icon(Icons.speed_outlined),

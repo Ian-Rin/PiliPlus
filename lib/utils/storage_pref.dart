@@ -288,7 +288,23 @@ abstract final class Pref {
     return CDNService.backupUrl;
   }
 
+  /// 机上模式 (see FlightMode, which says what it changes).
+  static bool get flightMode =>
+      _setting.get(SettingBoxKey.flightMode, defaultValue: false);
+
+  /// 机上模式: a video starts a quality above its lowest where the link
+  /// has lately carried three times that (FlightMode.carries).
+  static bool get flightRaiseQuality =>
+      _setting.get(SettingBoxKey.flightRaiseQuality, defaultValue: true);
+
+  /// 机上模式: what the link and playback do is written down (FlightLog).
+  static bool get flightMeasure =>
+      _setting.get(SettingBoxKey.flightMeasure, defaultValue: true);
+
+  // 机上模式 plays through the proxy whatever this is set to: what waits
+  // out a link that comes and goes is the proxy's.
   static bool get threadRipperEnabled =>
+      flightMode ||
       _setting.get(SettingBoxKey.threadRipperEnabled, defaultValue: true);
   // 剧集加速 (upstream 2026.10.8.1): on unless switched off.
   static bool get threadRipperEpisodeEnabled => _setting.get(
@@ -457,7 +473,10 @@ abstract final class Pref {
   static bool get showViewPoints =>
       _setting.get(SettingBoxKey.showViewPoints, defaultValue: true);
 
+  // Not in 机上模式: the list and its covers (some forty pictures) are
+  // asked for as the video starts, of the link the video needs.
   static bool get showRelatedVideo =>
+      !flightMode &&
       _setting.get(SettingBoxKey.showRelatedVideo, defaultValue: true);
 
   static bool get showVideoReply =>
@@ -926,6 +945,11 @@ abstract final class Pref {
   static const _maxAutoBuffer = 48 * 0x100000;
   static const _maxAutoBackBuffer = 96 * 0x100000;
 
+  /// 机上模式's cache ahead (see [initBuffer]).
+  static const _flightBufferSec = 600;
+  static const _maxFlightBuffer = 64 * 0x100000;
+  static const _maxFlightBackBuffer = 48 * 0x100000;
+
   /// Behind the playhead, in seconds of the average bitrate: what keeps a
   /// look back of ten seconds in the cache. mpv seeks in its cache only when
   /// the keyframe before the target is still there, and Bilibili's keyframes
@@ -957,6 +981,30 @@ abstract final class Pref {
       ahead = max(least, min(need, _maxAutoBuffer));
       final back = (bitrate / 8 * _backSec).round();
       behind = max(least, min(back, _maxAutoBackBuffer));
+    }
+    if (flightMode) {
+      // 机上模式: the link is gone for minutes at a time, and what plays
+      // through that is what was downloaded before. Ten minutes ahead (a
+      // quarter of a megabyte a minute of sound, two of the lowest
+      // picture), filled again once half a minute of it has played.
+      final flightAhead = bitrate != null && bitrate > 0
+          ? (bitrate / 8 * _flightBufferSec * 1.25).round()
+          : _maxAutoBuffer;
+      // Behind the playhead as much: a song played again (单个循环 seeks
+      // to its start), or a look back, comes from the cache, where a seek
+      // out of it starts over on the link (nine seconds, on a good one).
+      final flightBehind = bitrate != null && bitrate > 0
+          ? (bitrate / 8 * _flightBufferSec).round()
+          : _maxAutoBuffer;
+      return {
+        'cache': 'yes',
+        'cache-secs': '$_flightBufferSec',
+        'demuxer-hysteresis-secs': '${_flightBufferSec - 30}',
+        'demuxer-max-bytes':
+            '${max(ahead, min(flightAhead, _maxFlightBuffer))}',
+        'demuxer-max-back-bytes':
+            '${max(behind, min(flightBehind, _maxFlightBackBuffer))}',
+      };
     }
     return {
       'cache': 'yes',

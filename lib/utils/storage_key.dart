@@ -11,6 +11,10 @@ abstract final class SettingBoxKey {
   static const threadRipperStartQuality = 'threadRipperStartQuality';
   static const threadRipperLiveQuality = 'threadRipperLiveQuality';
   static const threadRipperSeamlessQuality = 'threadRipperSeamlessQuality';
+  // 机上模式 (FlightMode).
+  static const flightMode = 'flightMode';
+  static const flightRaiseQuality = 'flightRaiseQuality';
+  static const flightMeasure = 'flightMeasure';
   // Not settings: the download speed last measured (RipperSpeed).
   static const ripperSpeedWifi = 'ripperSpeedWifi';
   static const ripperSpeedCellular = 'ripperSpeedCellular';

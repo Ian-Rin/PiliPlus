@@ -80,7 +80,7 @@ class RipperSpeedMeter {
 
   /// The speed, in kbit/s, of one window of [bytes] that took [ms] to
   /// arrive, on its own connections: the least the connection does. Null
-  /// for a window too small or too quick to say.
-  static int? burst(int bytes, int ms) =>
-      bytes < 1024 * 1024 || ms < 10 ? null : bytes * 8 ~/ ms;
+  /// for a window too small (under [least]) or too quick to say.
+  static int? burst(int bytes, int ms, {int least = 1024 * 1024}) =>
+      bytes < least || ms < 10 ? null : bytes * 8 ~/ ms;
 }

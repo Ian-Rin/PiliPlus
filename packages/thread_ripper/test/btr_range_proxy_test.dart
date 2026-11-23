@@ -491,6 +491,73 @@ void main() {
     expect(media.map((r) => r.$2), contains(65536 + 128 * 1024 + 256 * 1024));
   });
 
+  test('a slow link: the file whole, in windows a quarter the size', () async {
+    proxy.close();
+    proxy = BtrRangeProxy(
+      concurrency: 4,
+      userAgent: 'test',
+      prefetchHeads: false,
+      slowLink: true,
+    );
+    await proxy.start();
+    final video = proxy.registerCandidates([endpoint('/good')]);
+    final audio = proxy.registerCandidates([endpoint('/good')], isAudio: true);
+    final results = await Future.wait([fetch(video), fetch(audio)]);
+    expect(results[0].$2, source);
+    expect(results[1].$2, source);
+    // Each track's head once: nothing of it was asked of a second node.
+    expect(requests.where((r) => r.$2 == 0), hasLength(2));
+    // No request is longer than a window (the video's 512 KiB).
+    expect(requests.every((r) => r.$3 - r.$2 + 1 <= 512 * 1024), isTrue);
+    // After the 64 KiB head: the video's windows of 256 then 512 KiB, the
+    // audio's of 96 then 128 KiB.
+    final starts = requests.map((r) => r.$2).toSet();
+    expect(starts, contains(65536 + 256 * 1024));
+    expect(starts, contains(65536 + 96 * 1024));
+    expect(starts, contains(65536 + (96 + 128) * 1024));
+    expect(peak, lessThanOrEqualTo(4));
+  });
+
+  test('says how long ago bytes last came', () async {
+    expect(proxy.sinceBytes, isNull);
+    await fetch(register(['/good']));
+    final since = proxy.sinceBytes;
+    expect(since, isNotNull);
+    expect(since!, lessThan(const Duration(seconds: 5)));
+    await Future<void>.delayed(const Duration(milliseconds: 120));
+    // Nothing asked for since: it grows.
+    expect(proxy.sinceBytes!, greaterThan(since));
+    expect(
+      proxy.sinceBytes!,
+      greaterThanOrEqualTo(const Duration(milliseconds: 100)),
+    );
+  });
+
+  test('counts what its requests did, and starts over when asked', () async {
+    expect(proxy.takeStats().requests, 0);
+    final (_, body) = await fetch(register(['/good']));
+    final stats = proxy.takeStats();
+    expect(stats.requests, requests.length);
+    expect(stats.requests, greaterThan(1));
+    expect(stats.failed, 0);
+    // Every byte of the file, and of what was asked twice.
+    expect(stats.bytes, greaterThanOrEqualTo(body.length));
+    // A first byte for every request that was not cut off before it.
+    expect(
+      stats.firstByteMs.length,
+      inInclusiveRange(stats.requests - stats.canceled, stats.requests),
+    );
+    expect(stats.firstByteMs.every((ms) => ms >= 0), isTrue);
+    expect(proxy.takeStats().requests, 0);
+  });
+
+  test('a node that fails is counted', () async {
+    await fetch(register(['/forbidden', '/good']));
+    final stats = proxy.takeStats();
+    expect(stats.failed, greaterThan(0));
+    expect(stats.requests, greaterThan(stats.failed));
+  });
+
   // While nothing is being written (a slow CDN), only the closed socket tells
   // the proxy that mpv has gone; its downloads must stop then, not at a
   // timeout.

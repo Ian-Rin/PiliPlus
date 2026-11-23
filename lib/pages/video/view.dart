@@ -210,7 +210,18 @@ class _VideoDetailPageVState extends State<VideoDetailPageV>
     videoDetailController.plPlayerController
       ..onStreamBrokeOff = _onStreamBrokeOff
       ..onRipperSpeed = videoDetailController.onRipperSpeed
-      ..onNearEnd = _onNearEnd;
+      ..onNearEnd = _onNearEnd
+      ..onReopenHere = _onReopenHere
+      ..onFlightStepDown = videoDetailController.flightStepDown;
+  }
+
+  /// The video opened again where it was, on the addresses it has (机上
+  /// 模式 giving up the picture: no request for new ones, of a link that
+  /// just showed it carries little).
+  Future<void>? _onReopenHere(Duration position) {
+    if (videoDetailController.isFileSource) return null;
+    videoDetailController.playedTime = position;
+    return videoDetailController.playerInit(autoplay: true);
   }
 
   /// The next video in the list made ready while this one ends.
@@ -363,6 +374,10 @@ class _VideoDetailPageVState extends State<VideoDetailPageV>
       player.onStreamBrokeOff = null;
     }
     if (player.onNearEnd == _onNearEnd) player.onNearEnd = null;
+    if (player.onReopenHere == _onReopenHere) player.onReopenHere = null;
+    if (player.onFlightStepDown == videoDetailController.flightStepDown) {
+      player.onFlightStepDown = null;
+    }
     if (player.onRipperSpeed == videoDetailController.onRipperSpeed) {
       player.onRipperSpeed = null;
     }

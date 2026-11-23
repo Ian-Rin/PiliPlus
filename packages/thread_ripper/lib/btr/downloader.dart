@@ -18,10 +18,14 @@ import 'package:thread_ripper/btr/fetch.dart';
 import 'package:thread_ripper/btr/range_core.dart';
 import 'package:thread_ripper/btr/resolver.dart';
 
+// How many rounds of addresses a piece gets and for how long, and the pause before the next
+// round (half a second, doubling, at most two): upstream's constants, which
+// RipperDownloadSettings hands out (pieceRounds, pieceRetryWindowMs, roundPauseMaxMs) so that
+// a slow link can have others.
 const _pieceRounds = 3;
 const _pieceRetryWindowMs = 25000;
-// The pause before a piece's next round of addresses: half a second, doubling, at most two.
-int roundPause(int round) => min(2000, 500 * (1 << (round - 1)));
+int roundPause(int round, [int maxMs = 2000]) =>
+    min(maxMs, 500 * (1 << min(20, round - 1)));
 // Below this a resumed request saves less than its own round trip costs.
 const _resumeMinBytes = 32 * 1024;
 // Hedging a piece with a playback deadline (see hedgeDue): a first copy projected to finish
@@ -59,9 +63,59 @@ class RipperDownloadSettings {
     this.stallTimeoutMs = 4000,
     this.attemptTimeoutMs = 15000,
     this.hedgeDelayMs = 900,
-  });
+  }) : slowLink = false;
+
+  /// Not upstream's: for a link like an airliner's satellite Wi-Fi (the
+  /// app's 机上模式). Measured on such flights: 0.6 to 0.8 s there and back,
+  /// one TCP connection carrying 0.9 to 3.7 Mbit/s of a link shaped to
+  /// about 4, a few percent of the packets lost, the link gone for seconds
+  /// to minutes at a time. Upstream's timings are a ground network's, and
+  /// there they cost what the link has least of:
+  /// - A copy of a piece 0.2 to 0.9 s after the first, when no byte has
+  ///   come: here no byte can have come (a request on an open connection
+  ///   takes one round trip, on a new one three or four), so every piece
+  ///   was asked for twice, of a link that carries one. And the copy that
+  ///   loses is aborted, which closes its connection: the next request
+  ///   there opens one anew, two seconds and more. Copies wait
+  ///   [hedgeDelayMs] here, [hedgeFloorMs] at least, and a start's race is
+  ///   one node at a time, [raceGapMs] apart.
+  /// - A request given up after 4 s without a byte: a packet lost twice
+  ///   running is silent that long at this round trip. The timeouts are
+  ///   three times upstream's.
+  /// - A piece given up after three rounds or 25 s, which ends the
+  ///   player's request: the link comes back, so the piece is asked for
+  ///   again for minutes ([pieceRounds], [pieceRetryWindowMs]).
+  /// - Connections: few, each a share of the same shaped link, and each
+  ///   more is one more handshake.
+  const RipperDownloadSettings.slowLink({this.concurrency = 4})
+    : autoConcurrency = false,
+      minChunkBytes = 64 * 1024,
+      firstByteTimeoutMs = 15000,
+      stallTimeoutMs = 12000,
+      attemptTimeoutMs = 60000,
+      hedgeDelayMs = 6000,
+      slowLink = true;
 
   static const allowedConcurrency = [4, 8, 16, 32, 64, 128];
+
+  /// See [RipperDownloadSettings.slowLink].
+  final bool slowLink;
+
+  /// The rounds of addresses a piece gets before it fails, and how long
+  /// after its first a new round may still begin.
+  int get pieceRounds => slowLink ? 40 : _pieceRounds;
+  int get pieceRetryWindowMs => slowLink ? 180000 : _pieceRetryWindowMs;
+
+  /// The longest pause before a piece's next round.
+  int get roundPauseMaxMs => slowLink ? 5000 : 2000;
+
+  /// The least a piece waits for its second copy, however fast pieces have
+  /// been.
+  int get hedgeFloorMs => slowLink ? 3000 : 250;
+
+  /// Between the copies of a raced request (a start's head and first
+  /// piece): 0 is upstream's race, all at once or within 300 ms.
+  int get raceGapMs => slowLink ? 2500 : 0;
 
   final int concurrency;
 
@@ -75,21 +129,27 @@ class RipperDownloadSettings {
 
   /// normalizeSettings: a thread count the settings do not offer becomes 8;
   /// the timings are upstream's constants.
-  RipperDownloadSettings normalized() => RipperDownloadSettings(
-    concurrency: allowedConcurrency.contains(concurrency) ? concurrency : 8,
-    autoConcurrency: autoConcurrency,
-  );
+  RipperDownloadSettings normalized() {
+    final threads = allowedConcurrency.contains(concurrency) ? concurrency : 8;
+    return slowLink
+        ? RipperDownloadSettings.slowLink(concurrency: threads)
+        : RipperDownloadSettings(
+            concurrency: threads,
+            autoConcurrency: autoConcurrency,
+          );
+  }
 
-  RipperDownloadSettings withConcurrency(int concurrency) =>
-      RipperDownloadSettings(
-        concurrency: concurrency,
-        autoConcurrency: autoConcurrency,
-        minChunkBytes: minChunkBytes,
-        firstByteTimeoutMs: firstByteTimeoutMs,
-        stallTimeoutMs: stallTimeoutMs,
-        attemptTimeoutMs: attemptTimeoutMs,
-        hedgeDelayMs: hedgeDelayMs,
-      );
+  RipperDownloadSettings withConcurrency(int concurrency) => slowLink
+      ? RipperDownloadSettings.slowLink(concurrency: concurrency)
+      : RipperDownloadSettings(
+          concurrency: concurrency,
+          autoConcurrency: autoConcurrency,
+          minChunkBytes: minChunkBytes,
+          firstByteTimeoutMs: firstByteTimeoutMs,
+          stallTimeoutMs: stallTimeoutMs,
+          attemptTimeoutMs: attemptTimeoutMs,
+          hedgeDelayMs: hedgeDelayMs,
+        );
 }
 
 typedef RipperRelease = void Function();
@@ -494,7 +554,10 @@ class RipperDownloader {
   // A second copy starts once a piece takes clearly longer than pieces have been
   // taking, instead of always waiting the full fixed delay.
   num _hedgeDelayMs(RipperDownloadSettings settings) => _pieceMs != 0
-      ? max(250, min(settings.hedgeDelayMs, _jsRound(_pieceMs * 1.5)))
+      ? max(
+          settings.hedgeFloorMs,
+          min(settings.hedgeDelayMs, _jsRound(_pieceMs * 1.5)),
+        )
       : settings.hedgeDelayMs;
 
   // Whether the second copy of a piece with a playback deadline should start now. Checked
@@ -910,10 +973,10 @@ class RipperDownloader {
     // Failing a piece ends acceleration for the whole video, and the list can be as short as
     // one working address. One slow reply must not decide that, so the list is walked again
     // after a pause; node health and bans have changed by then, so it is rebuilt each time.
-    for (var round = 0; round < _pieceRounds; round += 1) {
+    for (var round = 0; round < settings.pieceRounds; round += 1) {
       if (round != 0) {
-        if (_now() - startedAt > _pieceRetryWindowMs) break;
-        await _pause(roundPause(round), signal);
+        if (_now() - startedAt > settings.pieceRetryWindowMs) break;
+        await _pause(roundPause(round, settings.roundPauseMaxMs), signal);
       }
       final candidates = _pieceCandidates(
         piece,
@@ -1002,9 +1065,11 @@ class RipperDownloader {
               }
 
               final measured = _hedgeDelayMs(settings);
+              // A slow link (RipperDownloadSettings.slowLink): a start's copies one after
+              // the other, and no sooner than any other piece's.
               final delay = probe
-                  ? 0
-                  : startup
+                  ? settings.raceGapMs * pairIndex
+                  : startup && !settings.slowLink
                   ? min(hasDeadline ? 200 : 250, measured)
                   : measured;
               double copyBps() => resolver.speed(url);
@@ -1027,7 +1092,10 @@ class RipperDownloader {
                 timer = Timer(_ms(50), check);
               }
 
-              if (hasDeadline && !probe) {
+              // A slow link's copies too, of every kind of piece: without a deadline
+              // hedgeDue asks for one only when the first has brought nothing for the
+              // delay, counted from when it had its connection.
+              if ((hasDeadline && !probe) || settings.slowLink) {
                 timer = Timer(Duration.zero, check);
               } else {
                 timer = Timer(_ms(delay), () => finish(waited.complete));
@@ -1212,25 +1280,59 @@ class RipperDownloader {
     } else {
       options.signal?.addListener(cancelAll);
     }
+    final gap = config().raceGapMs;
+    // A slow link (RipperDownloadSettings.slowLink): the next node is asked once those
+    // asked have brought nothing for a gap, one gap after the other at the earliest. A
+    // copy that is coming in, however slowly, is the link's doing, and another would
+    // take half of what it gets.
+    final startedAt = _now();
+    var heardAt = startedAt;
+    void heard(Map<String, Object?> event) {
+      if (event['phase'] == 'progress') heardAt = _now();
+    }
+
+    Future<_Result> relayed(int index) async {
+      while (index != 0) {
+        final now = _now();
+        final wait = max(startedAt + gap * index - now, heardAt + gap - now);
+        if (wait <= 0) break;
+        await _pause(wait.ceil(), controllers[index].signal);
+      }
+      return _attempt(
+        piece,
+        candidates[index],
+        controllers[index].signal,
+        options.kind ?? 'meta',
+        resolver,
+        220,
+        null,
+        null,
+        heard,
+      );
+    }
+
     try {
       _Result winner;
       try {
         winner = await promiseAny([
           for (var index = 0; index < candidates.length; index++)
-            _delayedAttempt(
-              piece,
-              candidates[index],
-              index == 0
-                  ? 0
-                  : index == 1
-                  ? 120
-                  : 300,
-              options.signal,
-              options.kind ?? 'meta',
-              resolver,
-              controllers[index],
-              220,
-            ),
+            if (gap != 0)
+              relayed(index)
+            else
+              _delayedAttempt(
+                piece,
+                candidates[index],
+                index == 0
+                    ? 0
+                    : index == 1
+                    ? 120
+                    : 300,
+                options.signal,
+                options.kind ?? 'meta',
+                resolver,
+                controllers[index],
+                220,
+              ),
         ]);
       } catch (aggregate) {
         if (options.signal?.aborted ?? false) {
@@ -1367,10 +1469,14 @@ class RipperDownloader {
     Object? lastError;
     // The addresses that just failed are backing off by the next round, so each round
     // moves on to the next three.
-    for (var round = 0; round < _pieceRounds; round += 1) {
+    final settings = config();
+    for (var round = 0; round < settings.pieceRounds; round += 1) {
       if (round != 0) {
-        if (_now() - startedAt > _pieceRetryWindowMs) break;
-        await _pause(roundPause(round), options.signal);
+        if (_now() - startedAt > settings.pieceRetryWindowMs) break;
+        await _pause(
+          roundPause(round, settings.roundPauseMaxMs),
+          options.signal,
+        );
       }
       var candidates = _unique(resolver.startupCandidates()).take(3).toList();
       if (candidates.isEmpty && round != 0) {

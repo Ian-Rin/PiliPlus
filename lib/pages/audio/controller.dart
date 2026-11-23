@@ -36,6 +36,7 @@ import 'package:PiliPlus/utils/android/android_helper.dart';
 import 'package:PiliPlus/utils/connectivity_utils.dart';
 import 'package:PiliPlus/utils/extension/iterable_ext.dart';
 import 'package:PiliPlus/utils/extension/num_ext.dart';
+import 'package:PiliPlus/utils/flight_mode.dart';
 import 'package:PiliPlus/utils/global_data.dart';
 import 'package:PiliPlus/utils/id_utils.dart';
 import 'package:PiliPlus/utils/page_utils.dart';
@@ -189,7 +190,12 @@ class AudioController extends GetxController
       );
     }
     ConnectivityUtils.isWiFi.then((isWiFi) {
-      cacheAudioQa = isWiFi ? Pref.defaultAudioQa : Pref.defaultAudioQaCellular;
+      // 机上模式: the 64 kbit/s sound, as a video's (FlightMode).
+      cacheAudioQa = FlightMode.on
+          ? FlightMode.audioQa
+          : isWiFi
+          ? Pref.defaultAudioQa
+          : Pref.defaultAudioQaCellular;
       if (!hasAudioUrl) {
         _queryPlayUrl();
       }

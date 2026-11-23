@@ -57,6 +57,8 @@ import 'package:PiliPlus/services/download/download_service.dart';
 import 'package:PiliPlus/utils/accounts.dart';
 import 'package:PiliPlus/utils/connectivity_utils.dart';
 import 'package:PiliPlus/utils/extension/nested_scroll_ext.dart';
+import 'package:PiliPlus/utils/flight_log.dart';
+import 'package:PiliPlus/utils/flight_mode.dart';
 import 'package:PiliPlus/utils/extension/num_ext.dart';
 import 'package:PiliPlus/utils/page_utils.dart';
 import 'package:PiliPlus/utils/path_utils.dart';
@@ -970,11 +972,28 @@ class VideoDetailController extends GetxController
     );
   }
 
+  /// The sound a video starts on: the one set, or 机上模式's.
+  int get _audioQaWanted =>
+      FlightMode.on ? FlightMode.audioQa : plPlayerController.cacheAudioQa;
+
   /// The quality a video starts on: [want] (the one set), or a lower one
   /// of [videos] where the download speed measured lately does not carry
   /// [want]'s stream (see [RipperSpeed]). [want] itself when the setting is
   /// off, no speed is known, or the streams cannot be told.
-  int _startQuality(List<VideoItem> videos, PlayUrlModel response, int want) {
+  ///
+  /// [forCid]: the video it is asked for, where the answer is to hold from
+  /// the making ready of a video to its start (see [_flightQuality]).
+  int _startQuality(
+    List<VideoItem> videos,
+    PlayUrlModel response,
+    int want, {
+    int? forCid,
+  }) {
+    // 机上模式: the lowest the video has, whatever is set or was measured
+    // elsewhere; or one above it.
+    if (FlightMode.on && videos.isNotEmpty) {
+      return _flightQuality(videos, response, want, forCid);
+    }
     if (!Pref.threadRipperStartQuality || videos.isEmpty) return want;
     final kbps = RipperSpeed.known();
     if (kbps == null) return want;
@@ -984,6 +1003,124 @@ class VideoDetailController extends GetxController
     // The quality set, not the one nearest to it that the video has: the
     // caller looks that up as before.
     return picked == offered.first.quality ? want : picked;
+  }
+
+  /// 机上模式's quality for a video: its lowest, or the one above that
+  /// where the link has lately carried three times its picture and sound
+  /// (FlightMode.carries), never above the quality set ([want]). One step
+  /// and no more: what is spared goes into the ten minutes downloaded
+  /// ahead, which is what plays when the link is gone.
+  ///
+  /// Decided once for a video ([forCid]) and kept ([_flightPick]): the
+  /// next video's proxy is made ready minutes before it starts
+  /// ([prepareNext]), on the stream decided then, and a start that decided
+  /// otherwise would find that proxy holding the wrong stream and begin
+  /// from nothing.
+  int _flightQuality(
+    List<VideoItem> videos,
+    PlayUrlModel response,
+    int want,
+    int? forCid,
+  ) {
+    final qualities = videos.availableVideoQualities.toList()..sort();
+    final lowest = qualities.first;
+    if (_flightPick case final pick?
+        when forCid != null &&
+            pick.cid == forCid &&
+            DateTime.now().difference(pick.at) < _nextFreshFor &&
+            qualities.contains(pick.quality)) {
+      return pick.quality;
+    }
+    var picked = lowest;
+    if (qualities.length > 1 && qualities[1] <= want) {
+      try {
+        final up = VideoUtils.findTargetVideo(
+          videos,
+          qualities[1],
+          response.acceptQuality,
+          response.supportFormats!,
+          preferCodecs,
+        ).$4;
+        final audios = response.dash?.audio;
+        final sound = audios == null || audios.isEmpty
+            ? 0
+            : VideoUtils.findTargetAudio(audios, FlightMode.audioQa).bandWidth ??
+                  64000;
+        final picture = up.bandWidth ?? 0;
+        if (up.id == qualities[1] &&
+            picture > 0 &&
+            FlightMode.carries(picture + sound)) {
+          picked = up.id;
+        }
+      } catch (_) {}
+    }
+    if (forCid != null) {
+      _flightPick = (cid: forCid, quality: picked, at: DateTime.now());
+    }
+    return picked;
+  }
+
+  ({int cid, int quality, DateTime at})? _flightPick;
+
+  /// A new video starts on [stream]: whether that is a step above its
+  /// lowest (机上模式), said in the start's log and to the viewer.
+  void _noteFlightRaise(List<VideoItem> videos, VideoItem stream) {
+    _flightRaisedTo = null;
+    if (!FlightMode.on || videos.isEmpty) return;
+    if (stream.id <= videos.availableVideoQualities.reduce(min)) return;
+    _flightRaisedTo = stream.id;
+    final kbps = FlightMode.linkKbps;
+    FlightLog.event('raise', {
+      'q': stream.id,
+      'kbps': kbps,
+      'kb': (stream.bandWidth ?? 0) ~/ 1000,
+    });
+    final name = VideoQuality.fromCode(stream.id).shortDesc;
+    final speed = kbps == null ? '' : '约 ${(kbps / 1000).toStringAsFixed(1)} Mbit/s，';
+    plPlayerController.noteBeforeOpen(
+      DateTime.now(),
+      '机上模式：网速$speed升一档到 $name（码率 ${(stream.bandWidth ?? 0) ~/ 1000} kbit/s）',
+    );
+    SmartDialog.showToast(
+      '网速够用，这个视频升一档到 $name',
+      displayTime: const Duration(seconds: 2),
+    );
+  }
+
+  /// The quality this video was raised to in 机上模式 ([_flightQuality]);
+  /// null if it was not, or has been taken back ([flightStepDown]).
+  int? _flightRaisedTo;
+
+  /// 机上模式: the quality a step above the lowest kept playback waiting
+  /// (PlPlayerController's watch, [FlightMode.raisedWait]). The video is
+  /// opened again at [position] on its lowest quality, on the addresses it
+  /// has. False if this video was not raised, or the viewer has since
+  /// chosen a quality by hand: nothing is done then.
+  bool flightStepDown(Duration position) {
+    final raised = _flightRaisedTo;
+    _flightRaisedTo = null;
+    if (raised == null || isFileSource || isQuerying) return false;
+    final videos = data.dash?.video;
+    if (videos == null ||
+        videos.isEmpty ||
+        currentVideoQa.value?.code != raised) {
+      return false;
+    }
+    final lowest = videos.availableVideoQualities.reduce(min);
+    if (lowest >= raised) return false;
+    _flightPick = (cid: cid.value, quality: lowest, at: DateTime.now());
+    // A change of quality under way leaves the reopening to this.
+    _qualityTurn++;
+    currentVideoQa.value = VideoQuality.fromCode(lowest);
+    firstVideo = findVideoByQa(lowest, setCodecs: true);
+    videoUrl = VideoUtils.getCdnUrl(firstVideo.playUrls);
+    _autoPlay.value = true;
+    playedTime = position;
+    plPlayerController
+      ..isBuffering.value = false
+      ..buffered.value = 0;
+    playerInit();
+    return true;
   }
 
   /// The stream that plays at the quality set ([want]), then those of the
@@ -1231,7 +1368,7 @@ class VideoDetailController extends GetxController
       // What [_queryVideoUrl] will pick.
       final (_, _, _, video) = VideoUtils.findTargetVideo(
         videos,
-        _startQuality(videos, response, cacheVideoQa),
+        _startQuality(videos, response, cacheVideoQa, forCid: nextCid),
         response.acceptQuality,
         response.supportFormats!,
         preferCodecs,
@@ -1239,7 +1376,7 @@ class VideoDetailController extends GetxController
       final audios = dash!.audio;
       final audio = audios == null || audios.isEmpty
           ? null
-          : VideoUtils.findTargetAudio(audios, plPlayerController.cacheAudioQa);
+          : VideoUtils.findTargetAudio(audios, _audioQaWanted);
       plPlayerController.prepareNextProxy(
         video.playUrls.toList(),
         audio?.playUrls.toList(),
@@ -1411,8 +1548,13 @@ class VideoDetailController extends GetxController
       if (fromReset) {
         wantQa = currentVideoQa.value?.code ?? cacheVideoQa;
       } else {
-        wantQa = _startQuality(video, response, cacheVideoQa);
-        if (wantQa != cacheVideoQa) {
+        wantQa = _startQuality(
+          video,
+          response,
+          cacheVideoQa,
+          forCid: cid.value,
+        );
+        if (wantQa != cacheVideoQa && !FlightMode.on) {
           _sayStartQuality(video, cacheVideoQa, wantQa);
         }
       }
@@ -1431,10 +1573,15 @@ class VideoDetailController extends GetxController
       firstVideo = targetVideo;
       currentDecodeFormats = targetDecode;
       currentVideoQa.value = VideoQuality.fromCode(targetQuality);
+      if (!fromReset) _noteFlightRaise(video, targetVideo);
       // A new video: watched from the quality it starts on, up to the one
       // set. Opened again, the watch it has goes on.
       if (!fromReset) {
-        final offered = _offeredStreams(video, response, cacheVideoQa);
+        // Not in 机上模式: a few fast seconds of such a link are no reason
+        // to raise the quality, and there is none below the lowest.
+        final offered = FlightMode.on
+            ? null
+            : _offeredStreams(video, response, cacheVideoQa);
         _qualityWatch =
             offered != null &&
                 offered.length > 1 &&
@@ -1448,10 +1595,7 @@ class VideoDetailController extends GetxController
       AudioItem? firstAudio;
       final audioList = dash.audio;
       if (audioList != null && audioList.isNotEmpty) {
-        firstAudio = VideoUtils.findTargetAudio(
-          audioList,
-          plPlayerController.cacheAudioQa,
-        );
+        firstAudio = VideoUtils.findTargetAudio(audioList, _audioQaWanted);
         audioUrl = VideoUtils.getCdnUrl(firstAudio.playUrls, isAudio: true);
         currentAudioQa = AudioQuality.fromCode(firstAudio.id);
       } else {
