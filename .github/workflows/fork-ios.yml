@@ -7,8 +7,9 @@
 #   commit's message has "[build now]" in it.
 # - New code on main cancels the build still running for older code.
 # - A build that no Mac ever picked up (GitHub's Macs can be out of capacity
-#   for hours) is tried once more. One that failed on a Mac (the code) and one
-#   cancelled by newer code are not.
+#   for hours) is started again as a run of its own, three tries in all (the
+#   "Retry" job). One that failed on a Mac (the code) and one cancelled by
+#   newer code or by hand are not.
 # - Nothing is built when the app would be the same as the last release's
 #   (the "Check" job, .github/scripts/fork-needs-build.sh); a run started by
 #   hand with "force" builds anyway.
@@ -35,6 +36,10 @@ on:
         description: 即使和上一版相同也编译
         type: boolean
         default: false
+      attempt:
+        description: 第几次尝试（没有 Mac 接任务时由 Retry 自动填，手动运行不用改）
+        type: string
+        default: "1"
 
 concurrency:
   group: fork-ios-${{ github.ref }}
@@ -42,6 +47,9 @@ concurrency:
 
 permissions:
   contents: write
+  # The "Retry" job: reads the build job's annotations, starts a run.
+  actions: write
+  checks: read
 
 jobs:
   # On Linux, plentiful and quick: no Mac is waited for to find out that
@@ -116,33 +124,49 @@ jobs:
     needs: [check, build]
     # A build no Mac picked up ends "cancelled", not "failure" ("The job was
     # not acquired by Runner of type hosted even after multiple attempts"),
-    # and failure() was false for it: the retry was skipped the one time it
-    # was needed. cancelled() is the run's: true for a run that newer code
-    # cancelled, whose build ends "cancelled" too and is not tried again.
+    # and a job after it was skipped both times it was needed: with
+    # failure(), and with !cancelled() (run 45209414237). always() it is,
+    # on Linux and for a few seconds: such a job runs in a cancelled run too
+    # and cannot be cancelled, and what it finds there is told apart below.
     if: >-
-      !cancelled() && needs.check.outputs.build == 'true'
+      always() && needs.check.outputs.build == 'true'
       && (needs.build.result == 'failure' || needs.build.result == 'cancelled')
       && needs.build.outputs.on-a-mac != 'true'
-    runs-on: macos-26
+    runs-on: ubuntu-latest
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v7
-        with:
-          fetch-depth: 0
-
-      - name: Setup Flutter
-        uses: subosito/flutter-action@v2
-        with:
-          channel: stable
-          flutter-version-file: pubspec.yaml
-
-      - name: Sync upstream
-        id: upstream
+      # A run of its own, as the daily sync starts one: it waits for a Mac
+      # anew, and newer code or a hand cancels it like any other.
+      - name: Start the build again
         shell: bash
-        run: bash .github/scripts/fork-merge-upstream.sh
-
-      - name: Build
-        uses: ./.github/actions/fork-build-ios
-        with:
-          release: "true"
-          push-merge: ${{ steps.upstream.outputs.merged }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ATTEMPT: ${{ inputs.attempt || '1' }}
+          FORCE: ${{ inputs.force || 'false' }}
+        run: |
+          api="repos/$GITHUB_REPOSITORY"
+          # Into variables, not pipes to grep or head: one that stops reading
+          # early fails the pipe (pipefail), whatever it found.
+          job=$(gh api "$api/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT/jobs" \
+            --jq '[.jobs[] | select(.name == "Build") | .id][0] // empty')
+          notes=""
+          if [ -n "$job" ]; then
+            notes=$(gh api "$api/check-runs/$job/annotations" --jq '.[].message')
+          fi
+          # Said by GitHub of a job no runner took; a build cancelled by
+          # newer code or by hand while it waited has no such note.
+          if [[ "$notes" != *"not acquired by Runner"* ]]; then
+            echo "The build was not left without a Mac: not started again." | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          head=$(git ls-remote "https://github.com/$GITHUB_REPOSITORY.git" "$GITHUB_REF" | cut -f1)
+          if [ "$head" != "$GITHUB_SHA" ]; then
+            echo "$GITHUB_REF_NAME has moved on to $head: its own run builds it." | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          if [ "$ATTEMPT" -ge 3 ]; then
+            echo "**连续 $ATTEMPT 次没有 Mac 接这个编译，不再自动重试。**稍后手动运行这个工作流。" >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          gh workflow run -R "$GITHUB_REPOSITORY" fork-ios.yml --ref "$GITHUB_REF_NAME" \
+            -f attempt="$((ATTEMPT + 1))" -f force="$FORCE"
+          echo "没有 Mac 接第 $ATTEMPT 次编译，已开始第 $((ATTEMPT + 1)) 次。" >> "$GITHUB_STEP_SUMMARY"
