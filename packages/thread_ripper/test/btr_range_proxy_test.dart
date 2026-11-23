@@ -935,6 +935,49 @@ void main() {
     },
   );
 
+  // The video track turned off in the background and on again on the
+  // return: mpv then reads video and audio anew where playback has gone on
+  // to, and both are to be in before it asks.
+  test('a track played before is made ready where playback is', () async {
+    proxy.close();
+    proxy = BtrRangeProxy(concurrency: 4, userAgent: 'test');
+    await proxy.start();
+    const fragment = 1000000;
+    final head = mp4Head(
+      [fragment - 100, 1500000, 1400000],
+      [5000, 5000, 5000],
+    );
+    final anchor = head.length;
+    source = Uint8List.fromList(List.generate(4000000, (i) => (i * 7) % 251));
+    source.setRange(0, head.length, head);
+    final second = anchor + fragment - 100;
+    final notes = <String>[];
+    proxy.onTrace = notes.add;
+    final audio = proxy.registerCandidates([endpoint('/good')], isAudio: true);
+    final video = proxy.registerCandidates([endpoint('/good')]);
+    // Played from the start.
+    final start = await fetch(video, range: 'bytes=0-1023');
+    expect(start.$2, source.sublist(0, 1024));
+    await Future<void>.delayed(const Duration(milliseconds: 300));
+    int asked(int at) => requests.where((r) => r.$2 == at).length;
+    final heads = asked(0);
+    expect(
+      await proxy.prepareSwitch(video, const Duration(seconds: 7)),
+      isTrue,
+    );
+    expect(notes, contains('video 从 7 秒开始：先下载字节 $second 起的窗口'));
+    expect(notes, contains('audio 从 7 秒开始：先下载字节 $second 起的窗口'));
+    // No head again, and mpv's requests there bring no new ones.
+    expect(asked(0), heads);
+    final before = asked(second);
+    expect(before, greaterThan(0));
+    final picture = await fetch(video, range: 'bytes=$second-');
+    expect(picture.$2, source.sublist(second));
+    final sound = await fetch(audio, range: 'bytes=$second-');
+    expect(sound.$2, source.sublist(second));
+    expect(asked(second), before);
+  });
+
   test('a request elsewhere leaves the windows downloaded ahead', () async {
     final url = proxy.registerCandidates([
       endpoint('/good'),

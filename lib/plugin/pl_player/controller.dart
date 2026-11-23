@@ -741,6 +741,9 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     final state = player.state;
     return '${state.playing ? '播放中' : '暂停'} '
         '位置 ${(state.position.inMilliseconds / 1000).toStringAsFixed(1)}s '
+        // The sound's own time: the position stands still with the picture
+        // while a decoder fails, the sound going on.
+        '声音 ${read('audio-pts')} '
         '缓冲到 ${(state.buffer.inMilliseconds / 1000).toStringAsFixed(1)}s '
         '时长 ${_seconds(state.duration)} '
         'avsync ${read('avsync')} '
@@ -759,6 +762,50 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
       if (!identical(_videoPlayerController, player)) return;
       trace.mark('$label ${_videoState(player)}');
     });
+  }
+
+  static double? _soundAt(Player player) {
+    try {
+      return double.tryParse(player.getProperty('audio-pts'));
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Playing on in the background without the PiP window: where the sound
+  /// is at a few moments of the first five seconds, the trip logged if it
+  /// fell behind the clock. Reported once: the sound stopped as the screen
+  /// was locked and came back by itself. Logs of such trips showed the
+  /// hardware decoder failing sixty times and more in the first half
+  /// second, and in two of sixteen a break of the sound or a wait for the
+  /// cache, with nothing to say which it was.
+  void _watchSoundAway(Player player) {
+    final trace = _bgTrace;
+    final from = _soundAt(player);
+    if (trace == null || from == null || !player.state.playing) return;
+    final clock = Stopwatch()..start();
+    for (final after in const [1000, 3000, 4800]) {
+      Future<void>.delayed(Duration(milliseconds: after), () {
+        if (!identical(_bgTrace, trace) ||
+            trace.done ||
+            _backgroundSince == null ||
+            !identical(_videoPlayerController, player) ||
+            !player.state.playing) {
+          return;
+        }
+        final now = _soundAt(player);
+        final rate = player.state.rate <= 0 ? 1.0 : player.state.rate;
+        final behind = now == null
+            ? null
+            : clock.elapsedMilliseconds / 1000 - (now - from) / rate;
+        trace.mark(
+          '后台 ${(after / 1000).toStringAsFixed(1)} 秒'
+          '${behind == null ? '' : '，声音比时钟少走 ${behind.toStringAsFixed(1)}s'} '
+          '${_videoState(player)}',
+          notable: behind != null && behind > 0.5,
+        );
+      });
+    }
   }
 
   void _reportBackgroundLater(Duration after) {
@@ -807,8 +854,10 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
         _bgTrace = _BackgroundTrace()
           ..mark(
             '切到后台 ${onlyPlayAudio.value ? '（只听声音）' : ''}'
+            '${IOSPipHelper.isActive ? '（画中画）' : ''}'
             '${_videoState(player)}',
           );
+        if (!IOSPipHelper.isActive) _watchSoundAway(player);
         _videoOffInBackgroundSoon(player, '后台播放超过 5 秒，关掉视频轨（不解码画面）');
       }
       return;
@@ -1003,7 +1052,7 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     }
     // Before the check of the time away: a track turned off is turned on
     // again after however short a trip.
-    final videoBack = player != null && _videoBackOn(player);
+    final videoBack = player != null && _videoBackOn(player, reseed: true);
     // A log showed a trip of under two seconds, paused, and play pressed
     // back in the app: the decoder failed then, and the picture stood still
     // with the sound going on. A failure mpv reported while away has the
@@ -1020,15 +1069,22 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
       '${hwFailed && !videoBack ? '（离开时硬件解码失败过）' : ''}',
     );
     if (videoBack) {
-      trace?.mark('重新打开视频轨，用新的视频解码器');
-      _reseedIfSoftware(player);
+      trace?.mark(
+        _videoComingOn == null
+            ? '重新打开视频轨，用新的视频解码器'
+            : '重新打开视频轨：先让加速代理取好那里的音视频',
+      );
     } else {
       _reseedOnResume = player;
     }
     _sampleLater(player, const Duration(seconds: 1), '回来 1 秒');
     _sampleLater(player, const Duration(seconds: 3), '回来 3 秒');
     if (player.state.playing) {
-      _reportBackgroundLater(const Duration(seconds: 6));
+      // Longer where the track is still to come on: what became of it is
+      // said up to seven seconds from here ([_videoOnPrepared]).
+      _reportBackgroundLater(
+        Duration(seconds: _videoComingOn == null ? 6 : 9),
+      );
     } else {
       _traceNextPlay = true;
       // Logged once the video starts again (see the playing listener), or
@@ -1386,6 +1442,10 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     }
     _videoOffFor = player;
     _bgTrace?.mark(note);
+    _watchForResume();
+  }
+
+  void _watchForResume() {
     _resumeWatch ??= AppLifecycleListener(
       // After the pages have been told (nothing left to do then).
       onShow: () => Timer.run(() {
@@ -1403,33 +1463,179 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     _resumeWatch = null;
   }
 
-  /// Turns on the track [_videoOff] turned off: true if it did. Not when
-  /// another video has been loaded since (its track is on, and its decoder
-  /// may have failed in the background).
-  bool _videoBackOn(Player player) {
+  /// Turns on the track [_videoOff] turned off: true if it did, or is
+  /// about to ([_videoOnPrepared]). Not when another video has been loaded
+  /// since (its track is on, and its decoder may have failed in the
+  /// background).
+  ///
+  /// [reseed]: the new decoder is looked at once the track is on
+  /// ([_reseedIfSoftware]).
+  bool _videoBackOn(Player player, {bool reseed = false}) {
     final off = _videoOffFor;
     _videoOffFor = null;
     if (!identical(off, player)) return false;
     try {
       if (player.getProperty('vid') != 'no') return false;
-      // The track it had: "auto" is the file's first, the quality the video
-      // was opened on, which it may have been changed from since.
-      player.setProperty(
-        'file-local-options/vid',
-        identical(_qualitiesOf, player) ? _vidWanted ?? 'auto' : 'auto',
-      );
     } catch (_) {
       return false;
     }
+    // The track it had: "auto" is the file's first, the quality the video
+    // was opened on, which it may have been changed from since.
+    final vid = identical(_qualitiesOf, player) ? _vidWanted ?? 'auto' : 'auto';
+    final proxy = _ripperProxy;
+    final url = identical(_qualitiesOf, player)
+        ? _qualityTracks[playingVideoQuality]?.url
+        : _videoAtProxy;
+    // Paused, there is no sound to keep going.
+    if (proxy != null && url != null && !isLive && player.state.playing) {
+      _videoOnPrepared(player, proxy, url, vid, reseed: reseed);
+      return true;
+    }
+    try {
+      player.setProperty('file-local-options/vid', vid);
+    } catch (_) {
+      return false;
+    }
+    if (reseed) _reseedIfSoftware(player);
     return true;
+  }
+
+  /// The proxy's address of the video of the file playing, as it was
+  /// opened; null if it does not come through the proxy.
+  String? _videoAtProxy;
+
+  /// The turn of [_videoOnPrepared] on its way; null when none is.
+  int? _videoComingOn;
+  int _videoOnTurns = 0;
+
+  /// Turns the video track on with the sound going on.
+  ///
+  /// mpv reads every track anew when one is selected, from the keyframe
+  /// before where playback is, and drops what it had buffered (a "refresh
+  /// seek"): the sound it has queued lasts a fraction of a second, and logs
+  /// of three returns from the background showed what followed: the sound
+  /// device run dry 0.2 s after the track was turned on (two of them), a
+  /// spinner of 0.1 to 1.7 s, the playhead standing still through the
+  /// longest, and the picture 1 to 2.2 s after the return.
+  /// As for a change of quality ([switchVideoStream]): the proxy first
+  /// fetches what mpv will ask for there, video and audio, the sound
+  /// playing on meanwhile with the track still off, and mpv does not wait
+  /// for a second of cache (cache-pause) until the picture is there.
+  /// Unready in two seconds: turned on as before.
+  Future<void> _videoOnPrepared(
+    Player player,
+    BtrRangeProxy proxy,
+    String url,
+    String vid, {
+    required bool reseed,
+  }) async {
+    final turn = ++_videoOnTurns;
+    _videoComingOn = turn;
+    final trace = _bgTrace;
+    final clock = Stopwatch()..start();
+    final soundFrom = _soundAt(player);
+    bool current() =>
+        _videoComingOn == turn &&
+        identical(_videoPlayerController, player) &&
+        _playerCount != 0;
+    String read(String name) {
+      try {
+        return player.getProperty(name);
+      } catch (_) {
+        return '';
+      }
+    }
+
+    String? cachePause;
+    try {
+      var ready = false;
+      try {
+        ready = await proxy
+            .prepareSwitch(
+              url,
+              // Where playback will be when the proxy has it.
+              player.state.position + const Duration(milliseconds: 1200),
+              wait: const Duration(milliseconds: 1500),
+            )
+            .timeout(const Duration(seconds: 2), onTimeout: () => false);
+      } catch (_) {}
+      final prepared = clock.elapsedMilliseconds;
+      if (!current()) return;
+      // Left again meanwhile, and not to the PiP window: off as it was,
+      // for the next return.
+      if (_backgroundSince != null && !IOSPipHelper.isActive) {
+        _videoOffFor = player;
+        _watchForResume();
+        trace?.mark('又切到后台，视频轨留着不开');
+        return;
+      }
+      try {
+        if (ready && identical(_ripperProxy, proxy)) {
+          cachePause = read('cache-pause');
+          player.setProperty('file-local-options/cache-pause', 'no');
+        }
+        player.setProperty('file-local-options/vid', vid);
+      } catch (_) {
+        return;
+      }
+      if (reseed) _reseedIfSoftware(player);
+      trace?.mark(
+        ready
+            ? '加速代理准备了 ${prepared}ms，打开视频轨'
+            : '加速代理 ${prepared}ms 没准备好，照旧直接打开视频轨',
+        notable: !ready,
+      );
+      // Until the picture is there, and a second more for what mpv reads
+      // ahead: cache-pause back on at once would wait on a thin cache.
+      int? shown;
+      for (var waited = 0; waited < 5000; waited += 100) {
+        await Future<void>.delayed(const Duration(milliseconds: 100));
+        if (!current()) return;
+        if (read('video-params/w').isNotEmpty) {
+          shown = clock.elapsedMilliseconds;
+          break;
+        }
+      }
+      final soundNow = _soundAt(player);
+      final rate = player.state.rate <= 0 ? 1.0 : player.state.rate;
+      final behind = shown == null || soundFrom == null || soundNow == null
+          ? null
+          : clock.elapsedMilliseconds / 1000 - (soundNow - soundFrom) / rate;
+      // Every such return is logged for now: what the phone does with this
+      // has not been seen.
+      trace?.mark(
+        '${shown == null ? '打开视频轨 5 秒没有画面' : '回来 ${shown}ms 出画面'}'
+        '${behind == null ? '' : '，这期间声音比时钟少走 ${behind.toStringAsFixed(1)}s'} '
+        '${_videoState(player)}',
+        notable: true,
+      );
+      if (cachePause != null) {
+        await Future<void>.delayed(const Duration(seconds: 1));
+      }
+    } finally {
+      if (_videoComingOn == turn) _videoComingOn = null;
+      // The option is the file's, and ends with it otherwise.
+      if (cachePause != null &&
+          cachePause.isNotEmpty &&
+          turn == _videoOnTurns &&
+          identical(_videoPlayerController, player)) {
+        try {
+          player.setProperty('file-local-options/cache-pause', cachePause);
+        } catch (_) {}
+      }
+    }
   }
 
   /// The PiP window shows the picture: a track turned off in the background
   /// is turned on for it.
   void onIOSPipActive() {
     final player = _videoPlayerController;
-    if (player != null && _videoBackOn(player)) {
+    if (player == null) return;
+    if (_videoBackOn(player)) {
       _bgTrace?.mark('画中画打开，重新打开视频轨');
+    } else if (_backgroundSince != null) {
+      // How long after leaving the window comes: not known from any log.
+      _bgTrace?.mark('画中画打开');
     }
   }
 
@@ -1569,6 +1775,7 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
         from == quality ||
         !identical(_qualitiesOf, player) ||
         _switchingStream ||
+        _videoComingOn != null ||
         _processing ||
         isLive ||
         onlyPlayAudio.value ||
@@ -2450,12 +2657,18 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     _qualityTracks.clear();
     _vidWanted = null;
     playingVideoQuality = null;
+    // A track of the file before on its way on ([_videoOnPrepared]) is
+    // not this file's.
+    _videoComingOn = null;
+    _videoOnTurns++;
+    _videoAtProxy = null;
     if (audioSource case final audio? when (audio.isNotEmpty)) {
       if (onlyPlayAudio.value) {
         video = audio;
       } else {
         // dely_open need provide length
         final first = video;
+        if (_ripperProxy != null) _videoAtProxy = first;
         video =
             ('edl://'
             '!no_chapters;'
