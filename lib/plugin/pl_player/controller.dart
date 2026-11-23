@@ -799,6 +799,7 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
       _reseedOnResume = null;
       _hwFailedAway = false;
       _hwFailWatch?.cancel();
+      _hwFailSince = null;
       // Time away counts in a startup still going: said, so it is not read
       // as a slow start.
       _startup?.mark('切到后台');
@@ -885,22 +886,33 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     final reopen = onStreamBrokeOff;
     // Without the page there are no new addresses to be had.
     if (player == null || _playerCount == 0 || reopen == null) return;
-    // Away: the return looks at the time ([_backFromAway]).
+    void lookAgain(Duration after) =>
+        _expiryWatch = Timer(after, _reopenBeforeExpiry);
+    // Away: the return looks at the time ([_backFromAway]), where there is
+    // one (not after a pull of the control center); looked at again in case.
     if (_backgroundSince != null ||
         WidgetsBinding.instance.lifecycleState != AppLifecycleState.resumed) {
+      lookAgain(const Duration(seconds: 2));
       return;
     }
     final duration = player.state.duration;
     final at = player.state.position;
+    // Played to the end, there is nothing to reopen (at the last frame a
+    // reopening showed no picture). Looked at again all the same: logs
+    // showed such a video started once more from its beginning, twenty
+    // minutes on, read the dead addresses (HTTP 403 from every node, "Seek
+    // failed", for forty seconds until the page was left), as nothing
+    // looked at the time any more.
     if (playerStatus.isCompleted ||
         (duration > Duration.zero &&
             duration - at < const Duration(seconds: 1))) {
+      lookAgain(const Duration(seconds: 1));
       return;
     }
     // Paused, nothing is read and nothing fails: a reopening would start
     // the sound. Looked at again until it plays.
     if (!player.state.playing) {
-      _expiryWatch = Timer(const Duration(seconds: 2), _reopenBeforeExpiry);
+      lookAgain(const Duration(seconds: 2));
       return;
     }
     Utils.reportError(
@@ -922,6 +934,7 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     final since = _backgroundSince;
     if (since == null) return;
     _backgroundSince = null;
+    _backAt = DateTime.now();
     _endResumeWatch();
     _startup?.mark('回到前台');
     final trace = _bgTrace;
@@ -961,6 +974,9 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
                     const Duration(seconds: 1)));
     if (player != null && ended && _addressesExpired()) {
       trace?.mark('视频地址已过期，但已经播完，不重新打开');
+      // Until it is played again ([_reopenBeforeExpiry]): the watch's own
+      // time came while the app was away.
+      _expiryWatch ??= Timer(const Duration(seconds: 1), _reopenBeforeExpiry);
     } else if (player != null && _addressesExpired()) {
       // Nothing of the old file to mend: a fresh open, decoder and all.
       _videoOffFor = null;
@@ -1152,13 +1168,70 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
       _hwFailedAway = true;
       return;
     }
-    if (_hwFailWatch?.isActive ?? false) return;
-    // mpv tries the hardware decoder on a few more frames, then its copy
-    // mode, then software: looked at once that has settled.
-    _hwFailWatch = Timer(const Duration(milliseconds: 500), () {
-      _rebuildIfSoftware(player, '前台播放中硬件解码失败');
-    });
+    _lookAtDecoderSoon(player, '前台播放中硬件解码失败');
   }
+
+  /// When the failures being waited out began ([_lookAtDecoderSoon]).
+  DateTime? _hwFailSince;
+
+  /// Looks at the decoder ([_rebuildIfSoftware]) half a second after the
+  /// last of a run of calls, two seconds after the first at the latest.
+  ///
+  /// mpv tries the hardware decoder on thirty frames, then its copy mode on
+  /// thirty, then software. The look used to come half a second after the
+  /// first failure, with the failures up to then ignored: half a second is
+  /// thirty frames at 60 a second and fifteen at 30, so it could come while
+  /// mpv was still trying, find the hardware decoder, and with no failure
+  /// after mpv's change (the copy mode works) nothing looked again. Logs
+  /// showed live streams watched on the copy mode for half an hour, and
+  /// videos on the software decoder, with no trip to the background before.
+  void _lookAtDecoderSoon(Player player, String why) {
+    final now = DateTime.now();
+    final since = _hwFailSince ??= now;
+    _hwFailWatch?.cancel();
+    _hwFailWatch = Timer(
+      now.difference(since) > const Duration(seconds: 2)
+          ? Duration.zero
+          : const Duration(milliseconds: 500),
+      () {
+        _hwFailSince = null;
+        _rebuildIfSoftware(player, why);
+      },
+    );
+  }
+
+  /// mpv has a picture of a new kind, which a change of decoder gives too:
+  /// one that came without a failed frame is seen here (the hardware
+  /// decoder not made at all as a video opens, which mpv says once and in
+  /// other words). Only for what VideoToolbox decodes in the ffmpeg the app
+  /// is built with: any other video is the software decoder's for good.
+  void _onNewPicture(Player player) {
+    if (!Platform.isIOS ||
+        _reseeding ||
+        !identical(_videoPlayerController, player) ||
+        _backgroundSince != null ||
+        WidgetsBinding.instance.lifecycleState != AppLifecycleState.resumed ||
+        (_hwFailWatch?.isActive ?? false)) {
+      return;
+    }
+    final hw = hwdec;
+    if (hw == null || hw == 'no' || !_fellBack(player, hw)) return;
+    final String codec;
+    try {
+      codec = player.getProperty('video-format');
+    } catch (_) {
+      return;
+    }
+    if (codec != 'hevc' && codec != 'h264') return;
+    _lookAtDecoderSoon(player, '没有解码失败，解码器却不是硬件解码');
+  }
+
+  /// When the app last came back ([_backFromAway]).
+  DateTime? _backAt;
+
+  /// When a live stream was last left on the decoder mpv fell back to
+  /// ([_rebuildIfSoftware]), for one log entry a minute.
+  DateTime _liveLeftAt = DateTime.fromMillisecondsSinceEpoch(0);
 
   /// Rebuilds the decoder ([_reseedDecoder]) if it is the software one where
   /// the hardware one is wanted, and logs it.
@@ -1177,6 +1250,26 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     // '' with the video track off: nothing to rebuild.
     if (!_fellBack(player, hw)) return;
     final decoder = _decoderNow(player);
+    // A live stream has only one cure, to be opened again
+    // ([_reseedDecoder]): four to seven seconds without a picture, where
+    // the decoder mpv fell back to plays on at the next keyframe. Worth it
+    // after a trip away, when the picture stands still anyway. Not while
+    // it is watched: logs showed a stream opened again twice in its first
+    // half minute (VideoToolbox failing the frames it was joined at,
+    // -12909), and one two minutes in. The next return mends it.
+    final now = DateTime.now();
+    final back = _backAt;
+    if (isLive &&
+        (back == null || now.difference(back) > const Duration(seconds: 10))) {
+      if (now.difference(_liveLeftAt) > const Duration(minutes: 1)) {
+        _liveLeftAt = now;
+        Utils.reportError(
+          '[解码器恢复] $why：直播在前台，留在 $decoder，不重新打开直播流 '
+          '${_videoState(player)}',
+        );
+      }
+      return;
+    }
     var trace = _bgTrace;
     if (trace == null || trace.done) {
       // Not around a trip already logged: a log of its own.
@@ -1192,7 +1285,6 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
       _sampleLater(player, const Duration(seconds: 2), '重建后 2 秒');
       _reportBackgroundLater(const Duration(seconds: 4));
     }
-    final now = DateTime.now();
     _hwRebuilds.removeWhere(
       (at) => now.difference(at) > const Duration(minutes: 1),
     );
@@ -1320,7 +1412,12 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     if (!identical(off, player)) return false;
     try {
       if (player.getProperty('vid') != 'no') return false;
-      player.setProperty('file-local-options/vid', 'auto');
+      // The track it had: "auto" is the file's first, the quality the video
+      // was opened on, which it may have been changed from since.
+      player.setProperty(
+        'file-local-options/vid',
+        identical(_qualitiesOf, player) ? _vidWanted ?? 'auto' : 'auto',
+      );
     } catch (_) {
       return false;
     }
@@ -1333,6 +1430,232 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     final player = _videoPlayerController;
     if (player != null && _videoBackOn(player)) {
       _bgTrace?.mark('画中画打开，重新打开视频轨');
+    }
+  }
+
+  // ---------------------------------------------------------------------
+  // A change of quality without opening the video again.
+
+  /// The player whose file holds the video's other qualities as tracks of
+  /// their own ([_withOtherQualities]).
+  Player? _qualitiesOf;
+
+  /// Of that file: each quality's address at the proxy, the first of its
+  /// CDN addresses (which stream of that quality it is), and the title its
+  /// track has; no title for the quality the file was opened on.
+  final _qualityTracks = <int, ({String url, String stream, String? title})>{};
+
+  /// The quality playing, of [_qualityTracks].
+  int? playingVideoQuality;
+
+  /// The video track changed to (mpv's id), for when it is turned off and
+  /// on again ([_videoBackOn]); null on the one the file was opened on.
+  String? _vidWanted;
+
+  bool _switchingStream = false;
+
+  /// A change of the video track is on its way ([switchVideoStream]).
+  bool get switchingVideoStream => _switchingStream;
+
+  static String _trackTitle(int quality) => 'btrq$quality';
+
+  /// [edl] (the video, then the audio), with the video's other qualities
+  /// after them, each a stream mpv opens only when its track is selected
+  /// ("!delay_open"): what mpv's own youtube-dl hook does to offer every
+  /// format of a video as a track. Their addresses are registered at the
+  /// proxy, which fetches nothing of them until one is changed to. No
+  /// length is given for them (the hook gives one): the file's duration
+  /// stays what its first video and its audio say, as before.
+  ///
+  /// A change of quality used to open the video again, two or three
+  /// seconds of spinner with the sound stopped. Selecting another video
+  /// track leaves the sound alone: mpv takes the picture down, reads the
+  /// new stream from the keyframe before where playback is, and shows it
+  /// once it has caught up (player/video.c: "video was just enabled via
+  /// track switching - skip to current time").
+  String _withOtherQualities(
+    Player player,
+    DataSource source,
+    String edl,
+    String first,
+  ) {
+    _qualitiesOf = null;
+    _qualityTracks.clear();
+    _vidWanted = null;
+    playingVideoQuality = null;
+    final proxy = _ripperProxy;
+    if (proxy == null ||
+        source is! NetworkSource ||
+        !Pref.threadRipperSeamlessQuality) {
+      return edl;
+    }
+    final quality = source.videoQuality;
+    final others = source.videoAlternates;
+    final stream = source.videoCandidates?.firstOrNull;
+    if (quality == null || others == null || others.isEmpty || stream == null) {
+      return edl;
+    }
+    final out = StringBuffer(edl);
+    for (final other in others) {
+      if (other.quality == quality ||
+          other.candidates.isEmpty ||
+          _qualityTracks.containsKey(other.quality)) {
+        continue;
+      }
+      final String url;
+      try {
+        url = proxy.register(other.candidates, lazy: true);
+      } catch (_) {
+        continue;
+      }
+      final title = _trackTitle(other.quality);
+      out
+        ..write(';!new_stream;!no_clip;!no_chapters;')
+        ..write('!delay_open,media_type=video,codec=${other.codec}')
+        ..write(other.width == null ? '' : ',w=${other.width}')
+        ..write(other.height == null ? '' : ',h=${other.height}')
+        ..write(other.fps == null ? '' : ',fps=${other.fps}')
+        ..write(';!track_meta,title=%${title.length}%$title;')
+        ..write('%${url.length}%$url');
+      _qualityTracks[other.quality] = (
+        url: url,
+        stream: other.candidates.first,
+        title: title,
+      );
+    }
+    if (_qualityTracks.isEmpty) return edl;
+    _qualityTracks[quality] = (url: first, stream: stream, title: null);
+    _qualitiesOf = player;
+    playingVideoQuality = quality;
+    return out.toString();
+  }
+
+  /// mpv's id of the video track that is [quality], of the file playing.
+  String? _vidOf(Player player, int quality) {
+    final wanted = _qualityTracks[quality];
+    if (wanted == null) return null;
+    for (final track in player.state.tracks.video) {
+      if (track.id == 'auto' || track.id == 'no') continue;
+      final title = track.title ?? '';
+      if (wanted.title == null
+          ? !title.startsWith('btrq')
+          : title == wanted.title) {
+        return track.id;
+      }
+    }
+    return null;
+  }
+
+  /// Changes the video playing to its stream of [quality], which [source]
+  /// describes (what a reopening would be given), with the sound going on:
+  /// true once the new picture is there. False if it cannot be done that
+  /// way, or the picture did not come: the caller opens the video again.
+  ///
+  /// The proxy first fetches what mpv will ask of the new stream where
+  /// playback will be, and the audio's windows there: mpv reads every track
+  /// anew from that time when one is selected and drops what it had
+  /// buffered, and with that at hand the sound it has queued lasts until
+  /// the audio is read again. Should it not, mpv would wait for a second of
+  /// cache with the sound stopped (cache-pause): turned off for the change.
+  Future<bool> switchVideoStream(int quality, NetworkSource source) async {
+    final player = _videoPlayerController;
+    final proxy = _ripperProxy;
+    final to = _qualityTracks[quality];
+    final from = playingVideoQuality;
+    if (player == null ||
+        proxy == null ||
+        to == null ||
+        from == null ||
+        from == quality ||
+        !identical(_qualitiesOf, player) ||
+        _switchingStream ||
+        _processing ||
+        isLive ||
+        onlyPlayAudio.value ||
+        identical(_videoOffFor, player) ||
+        to.stream != source.videoCandidates?.firstOrNull ||
+        WidgetsBinding.instance.lifecycleState != AppLifecycleState.resumed) {
+      return false;
+    }
+    bool current() =>
+        identical(_videoPlayerController, player) &&
+        identical(_ripperProxy, proxy) &&
+        identical(_qualitiesOf, player) &&
+        _playerCount != 0;
+    String read(String name) {
+      try {
+        return player.getProperty(name);
+      } catch (_) {
+        return '';
+      }
+    }
+
+    _switchingStream = true;
+    final clock = Stopwatch()..start();
+    String? cachePause;
+    try {
+      // Where playback will be when the proxy has it ready.
+      final ready = await proxy.prepareSwitch(
+        to.url,
+        player.state.position + const Duration(milliseconds: 1200),
+      );
+      final prepared = clock.elapsedMilliseconds;
+      if (!ready || !current()) return false;
+      final id = _vidOf(player, quality);
+      if (id == null) return false;
+      final at = player.state.position;
+      try {
+        cachePause = read('cache-pause');
+        player
+          ..setProperty('file-local-options/cache-pause', 'no')
+          ..setProperty('file-local-options/vid', id);
+      } catch (_) {
+        return false;
+      }
+      _vidWanted = to.title == null ? null : id;
+      // The picture is taken down, then there again with the new stream's
+      // first frame at the time playback is at.
+      var gone = false;
+      int? shown;
+      for (var waited = 0; waited < 5000; waited += 100) {
+        await Future<void>.delayed(const Duration(milliseconds: 100));
+        if (!current()) return false;
+        if (read('video-params/w').isEmpty) {
+          gone = true;
+        } else if (gone || waited >= 500) {
+          shown = clock.elapsedMilliseconds;
+          break;
+        }
+      }
+      final onTrack = read('current-tracks/video/id') == id;
+      final size = '${read('video-params/w')}x${read('video-params/h')}';
+      if (shown == null || !onTrack) {
+        Utils.reportError(
+          '[画质切换] 不重新加载的切换没成：$from → $quality，'
+          '准备 ${prepared}ms，5 秒内${shown == null ? '没有新画面' : '视频轨不是要的那条'}，'
+          '改为重新加载 ${_videoState(player)}',
+        );
+        return false;
+      }
+      playingVideoQuality = quality;
+      dataSource = source;
+      Utils.reportError(
+        '[画质切换] 不重新加载：$from → $quality（$size），位置 ${_seconds(at)}，'
+        '准备 ${prepared}ms，换轨后 ${shown - prepared}ms 出新画面，'
+        '解码器 ${_decoderNow(player)}',
+      );
+      return true;
+    } finally {
+      _switchingStream = false;
+      // Whatever became of the change, while this player lives (the option
+      // is the file's, and ends with it otherwise).
+      if (cachePause != null &&
+          cachePause.isNotEmpty &&
+          identical(_videoPlayerController, player)) {
+        try {
+          player.setProperty('file-local-options/cache-pause', cachePause);
+        } catch (_) {}
+      }
     }
   }
 
@@ -1462,6 +1785,9 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     bool autoplay = true,
     // 初始化播放位置
     Duration? seekTo,
+    // [seekTo] is where the video was left: it starts at the keyframe
+    // before it (see [_keyframeStartOf]).
+    bool keyframeStart = false,
     // 初始化播放速度
     double speed = 1.0,
     int? width,
@@ -1547,7 +1873,13 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
         return;
       }
       // 配置Player 音轨、字幕等等
-      await _createVideoController(dataSource, seekTo, volume, rotate);
+      await _createVideoController(
+        dataSource,
+        seekTo,
+        volume,
+        rotate,
+        keyframeStart: keyframeStart,
+      );
 
       if (_playerCount == 0) {
         _removeListeners();
@@ -1669,7 +2001,12 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     if (state != null && state != AppLifecycleState.resumed) return;
     if (sustained && DateTime.now().isBefore(_speedQuietUntil)) return;
     RipperSpeed.note(kbps, sustained: sustained);
+    onRipperSpeed?.call(kbps, sustained: sustained);
   }
+
+  /// The same speeds, for the page that owns the playback: the quality of
+  /// the video playing is changed by them (VideoDetailController).
+  void Function(int kbps, {required bool sustained})? onRipperSpeed;
 
   DateTime _proxyGaveUpAt = DateTime(0);
 
@@ -1678,6 +2015,13 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
   /// their time, and could not tell which. The proxy's reason, once in
   /// twenty seconds (mpv asks again at the same byte every few seconds).
   void _noteProxyGaveUp(String note) {
+    // Dead addresses, and they are read: not left to the watch's next look.
+    // Only while it does look (a reopening given dead addresses again has
+    // none, and would go round).
+    if (_expiryWatch != null && _addressesExpired()) {
+      _expiryWatch?.cancel();
+      _reopenBeforeExpiry();
+    }
     final now = DateTime.now();
     if (now.difference(_proxyGaveUpAt) < const Duration(seconds: 20)) return;
     _proxyGaveUpAt = now;
@@ -1961,8 +2305,9 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     DataSource dataSource,
     Duration? seekTo,
     Volume? volume,
-    int? rotate,
-  ) async {
+    int? rotate, {
+    bool keyframeStart = false,
+  }) async {
     isBuffering.value = false;
     _heartDuration = 0;
     danmakuController?.clear();
@@ -2100,11 +2445,17 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
         audioSource = dataSource.audioSource;
       }
     }
+    // Of the file before; set again below if this one has them.
+    _qualitiesOf = null;
+    _qualityTracks.clear();
+    _vidWanted = null;
+    playingVideoQuality = null;
     if (audioSource case final audio? when (audio.isNotEmpty)) {
       if (onlyPlayAudio.value) {
         video = audio;
       } else {
         // dely_open need provide length
+        final first = video;
         video =
             ('edl://'
             '!no_chapters;'
@@ -2113,18 +2464,31 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
             '!new_stream;!no_chapters;'
             // '!delay_open,media_type=audio;'
             '%${isFileSource ? utf8.encode(audio).length : audio.length}%$audio');
+        video = _withOtherQualities(player, dataSource, video, first);
       }
       audioFilterExtras(volume, map: extras);
     }
 
     assert(!isLive || seekTo == null);
-    _appMovesPlayhead(seekTo ?? Duration.zero);
+    final fromKeyframe =
+        keyframeStart &&
+        !isLive &&
+        !isFileSource &&
+        seekTo != null &&
+        seekTo > Duration.zero;
+    // For this file only, and until its first picture.
+    if (fromKeyframe) extras['hr-seek'] = 'no';
+    _keyframeStartOf = fromKeyframe ? player : null;
+    _appMovesPlayhead(
+      seekTo ?? Duration.zero,
+      before: fromKeyframe ? _keyframeSlack : Duration.zero,
+    );
     _openingFile = true;
     _ripperProxy?.onTrace = _startup?.mark;
     _startup
       ?..label =
           '${_ripperProxy != null ? '线程撕裂者' : '直连'}'
-          '${seekTo != null && seekTo > Duration.zero ? '，从 ${seekTo.inSeconds} 秒开始' : ''}'
+          '${seekTo != null && seekTo > Duration.zero ? '，从 ${seekTo.inSeconds} 秒开始${fromKeyframe ? '（它前面的关键帧）' : ''}' : ''}'
           '${audioSource?.isNotEmpty == true ? '' : '，无单独音轨'}'
           '${switch (extras['demuxer-max-bytes']) {
             final bytes? => '，缓冲 ${(int.parse(bytes) / 0x100000).toStringAsFixed(0)}MB',
@@ -2475,12 +2839,50 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
   /// before it. [recovering] once the end that followed is being resumed.
   ({Duration from, DateTime at, bool recovering})? _jumpToEnd;
 
-  void _appMovesPlayhead(Duration to) {
+  void _appMovesPlayhead(Duration to, {Duration before = Duration.zero}) {
     _appMovedAt = DateTime.now();
     _appMovedTo = to;
+    _appMovedBefore = before;
     _reportedPosition = to;
     _jumpToEnd = null;
     _lastGoodPosition = to;
+  }
+
+  /// How far before [_appMovedTo] the playhead may land: a video resumed
+  /// from the keyframe before where it was left ([_keyframeStartOf]).
+  Duration _appMovedBefore = Duration.zero;
+
+  /// [position] is where the app last moved the playhead to, give or take
+  /// three seconds.
+  bool _whereAppAsked(Duration position) =>
+      position <= _appMovedTo + const Duration(seconds: 3) &&
+      position >= _appMovedTo - _appMovedBefore - const Duration(seconds: 3);
+
+  /// The player whose file was opened with precise seeking off (hr-seek)
+  /// for its start, until that start is over ([_endKeyframeStart]).
+  ///
+  /// A video resumed where the history says was opened at that very time:
+  /// mpv then decodes from the keyframe before it and shows nothing until
+  /// it is there, so everything between the two is downloaded and decoded
+  /// first, up to five seconds of video (a keyframe every five seconds).
+  /// Logs of 28 such starts showed the first megabyte in, then 0.7 s more
+  /// to the first picture, 1.6 s for 4K and up to 7 s, where a start from
+  /// zero had its picture before that megabyte was complete. Such a start
+  /// now begins at the keyframe, some seconds before where it was left.
+  Player? _keyframeStartOf;
+
+  /// Keyframes are five seconds apart, and a second for luck.
+  static const _keyframeSlack = Duration(seconds: 6);
+
+  /// The start is over (a picture is there), or the app seeks: seeks are
+  /// precise again, as mpv has them by default.
+  void _endKeyframeStart() {
+    final player = _keyframeStartOf;
+    if (player == null) return;
+    _keyframeStartOf = null;
+    try {
+      player.setProperty('hr-seek', 'default');
+    } catch (_) {}
   }
 
   /// Set as a file is opened, until it reports a position of its own.
@@ -2496,7 +2898,7 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
   /// at most are waited for it).
   bool _staleFromFileBefore(Duration position) {
     if (!_openingFile) return false;
-    if ((position - _appMovedTo).abs() <= const Duration(seconds: 3) ||
+    if (_whereAppAsked(position) ||
         DateTime.now().difference(_appMovedAt) > const Duration(seconds: 10)) {
       _openingFile = false;
       return false;
@@ -2534,7 +2936,7 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     final now = DateTime.now();
     final askedFor =
         now.difference(_appMovedAt) < const Duration(seconds: 10) &&
-        (position - _appMovedTo).abs() <= const Duration(seconds: 3);
+        _whereAppAsked(position);
     if (!askedFor && (position - from).abs() > const Duration(seconds: 3)) {
       _bgTrace?.mark(
         '位置从 ${_seconds(from)} 跳到 ${_seconds(position)}（不是 App 发起的），'
@@ -2634,7 +3036,18 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
       var media = ctr.current.last;
       if (!isLive) {
         final start = at ?? ctr.state.position;
-        media = media.copyWith(start: start);
+        // The file's options are given again with it. Not the start from a
+        // keyframe (that was for its first opening, and nothing would end
+        // it here: [_keyframeStartOf]); and the video track it was changed
+        // to, where mpv would take the file's first ([switchVideoStream]).
+        final extras = {...?media.extras}
+          ..remove('hr-seek')
+          ..remove('vid');
+        if (identical(_qualitiesOf, ctr)) {
+          if (_vidWanted case final vid?) extras['vid'] = vid;
+        }
+        _keyframeStartOf = null;
+        media = media.copyWith(start: start, extras: extras);
         _appMovesPlayhead(start);
       }
       _ripperRestarting = true;
@@ -2815,6 +3228,8 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
             '解码出第一帧 ${params.dw}x${params.dh}',
             once: 'frame',
           );
+          _endKeyframeStart();
+          _onNewPicture(player);
         }
       }),
       // In a start's log: the stream is open and read as far as its tracks
@@ -3022,6 +3437,7 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     // Cleared as the spinner of the seek ends; a seek within the cache
     // (paused, say) may bring none, and the flag stayed set: playback was
     // then taken for not going, and its next wait for data not counted.
+    _endKeyframeStart();
     final movedAt = _appMovedAt;
     Future<void>.delayed(const Duration(seconds: 2), () {
       if (identical(_appMovedAt, movedAt) && !isBuffering.value) {

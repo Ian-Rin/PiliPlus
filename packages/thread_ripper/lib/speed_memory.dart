@@ -4,7 +4,8 @@
 // After Bilibili-thread-ripper's automatic quality (page-hook.js,
 // driveAutoQuality), which in a browser changes the quality as a video
 // plays. In the app a change of quality opens the video again (a second or
-// two of spinner), so the speed is used once, as a video is opened: where
+// two of spinner), so here the speed is used once, as a video is opened
+// (RipperQualityWatch is what changes it as it plays, far less often): where
 // the connection has just shown that it does not carry the quality set, the
 // video starts a step or more below it instead of waiting on the download at
 // every scene. What is taken over from upstream:

@@ -384,11 +384,14 @@ class BtrRangeProxy {
   /// [startAt]: where playback will start (a video resumed from the
   /// history): the windows there download as soon as the head is in (see
   /// [_warmAtStart]).
+  /// [lazy]: nothing of it is fetched until it is asked for or made ready
+  /// ([prepareSwitch]): another quality of the video, which may never play.
   String register(
     Iterable<String> urls, {
     bool isAudio = false,
     int warmBytes = 0,
     Duration? startAt,
+    bool lazy = false,
   }) {
     final originals = urls
         .map(Uri.parse)
@@ -407,6 +410,7 @@ class BtrRangeProxy {
       isAudio: isAudio,
       warmBytes: warmBytes,
       startAt: startAt,
+      lazy: lazy,
     );
   }
 
@@ -418,6 +422,7 @@ class BtrRangeProxy {
     bool isAudio = false,
     int warmBytes = 0,
     Duration? startAt,
+    bool lazy = false,
   }) {
     if (_closed || _server == null || urls.isEmpty) {
       throw StateError('No download session or media candidates');
@@ -439,10 +444,67 @@ class BtrRangeProxy {
     );
     final resume = startAt != null && startAt > Duration.zero ? startAt : null;
     if (resume != null && !isAudio) _resumeKey = Completer<Duration?>();
-    if (prefetchHeads || warmBytes > 0 || resume != null) {
+    if (!lazy && (prefetchHeads || warmBytes > 0 || resume != null)) {
       _prefetchHead(track, warmBytes: warmBytes, startAt: resume);
     }
     return 'http://127.0.0.1:$_port$id';
+  }
+
+  /// Makes the video track at [url] (one [register]ed here, another
+  /// quality of the video playing) ready to take over at [at]: its head,
+  /// and the windows mpv will ask of it there, as for a start away from the
+  /// beginning ([_warmAtStart]). The audio's windows there too: mpv reads
+  /// every track anew from that time when one is changed (a "refresh
+  /// seek", which drops what it had buffered), and audio that had to come
+  /// from a CDN again would stop the sound the change is meant to spare.
+  ///
+  /// Completes when what the video starts on is in, or after [wait]: true
+  /// if the track can be changed to (its head is there), false if not.
+  Future<bool> prepareSwitch(
+    String url,
+    Duration at, {
+    Duration wait = const Duration(seconds: 5),
+  }) async {
+    final track = _tracks[Uri.parse(url).path];
+    if (_closed || track == null || track.kind != 'video') return false;
+    final clock = Stopwatch()..start();
+    // The audio starts where the video's keyframe is, as at a start.
+    _resumeKey = Completer<Duration?>();
+    for (final audio in _tracks.values) {
+      if (audio.kind == 'audio' && audio.head != null) {
+        unawaited(
+          _warmAtStart(audio, at).then((_) {}, onError: (Object _) {}),
+        );
+      }
+    }
+    if (track.head == null) {
+      _prefetchHead(track, startAt: at);
+      try {
+        await track.headLoad?.timeout(wait);
+      } catch (_) {}
+      if (_closed || track.head == null) {
+        _tellResumeKey(null);
+        return false;
+      }
+    } else {
+      // Played before, or made ready before: only the windows.
+      try {
+        await _warmAtStart(track, at);
+      } catch (_) {
+        _tellResumeKey(null);
+      }
+    }
+    // All but the last, which is the one after where it starts.
+    final windows = List.of(track.warm);
+    if (windows.length > 1) windows.removeLast();
+    final left = wait - clock.elapsed;
+    if (windows.isNotEmpty && left > Duration.zero) {
+      await Future.wait([
+        for (final window in windows)
+          window._done.then((_) {}, onError: (Object _) {}),
+      ]).timeout(left, onTimeout: () => const []);
+    }
+    return !_closed;
   }
 
   /// mpv opens an EDL's tracks one after the other: the audio only once the

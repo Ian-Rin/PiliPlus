@@ -137,9 +137,27 @@ List<SettingsModel> get videoSettings => [
     title: '线程撕裂者：按网速选起始画质',
     subtitle:
         '半小时内测到的下载速度带不动默认画质时，打开视频先用低一档或几档的画质，并提示；'
-        '播放中不会自动切换，可以手动切回',
+        '播放中是否再调见下一项',
     leading: Icon(Icons.network_check),
     setKey: SettingBoxKey.threadRipperStartQuality,
+    defaultVal: true,
+  ),
+  const SwitchModel(
+    title: '线程撕裂者：播放中按网速调画质',
+    subtitle:
+        '播放等下载、几秒内两次测到网速带不动当前画质时降档；网速稳定够用 20 秒后升回，最高到默认画质。'
+        '两次切换至少隔一分钟；手动选过画质的视频不再自动调',
+    leading: Icon(Icons.swap_vert),
+    setKey: SettingBoxKey.threadRipperLiveQuality,
+    defaultVal: true,
+  ),
+  const SwitchModel(
+    title: '线程撕裂者：切换画质不重新加载',
+    subtitle:
+        '换画质时只换视频轨，声音不停，画面短暂停在上一帧后换成新画质；手动和自动切换都适用。'
+        '换不成时退回重新加载。关闭后每次切换都重新加载；下次加载生效',
+    leading: Icon(Icons.auto_awesome_motion_outlined),
+    setKey: SettingBoxKey.threadRipperSeamlessQuality,
     defaultVal: true,
   ),
   NormalModel(

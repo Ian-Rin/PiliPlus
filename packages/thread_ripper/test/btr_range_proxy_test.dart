@@ -856,6 +856,85 @@ void main() {
     expect((await seek).$2, source.sublist(third));
   });
 
+  // Another quality of the video playing: nothing of it is fetched until
+  // the player is about to change to it, then its head and what mpv asks of
+  // it at the time it takes over, and the audio's windows there (mpv reads
+  // the audio anew from that time when a track changes).
+  test('a lazy track is fetched only when made ready to take over', () async {
+    proxy.close();
+    proxy = BtrRangeProxy(concurrency: 4, userAgent: 'test');
+    await proxy.start();
+    const fragment = 1000000;
+    final head = mp4Head(
+      [fragment - 100, 1500000, 1400000],
+      [5000, 5000, 5000],
+    );
+    final anchor = head.length;
+    source = Uint8List.fromList(List.generate(4000000, (i) => (i * 7) % 251));
+    source.setRange(0, head.length, head);
+    final second = anchor + fragment - 100;
+    final notes = <String>[];
+    proxy.onTrace = notes.add;
+    final audio = proxy.registerCandidates([endpoint('/good')], isAudio: true);
+    final other = proxy.registerCandidates([endpoint('/good')], lazy: true);
+    await Future<void>.delayed(const Duration(milliseconds: 300));
+    // The audio's head only.
+    expect(requests, [('/good', 0, 65535)]);
+    expect(
+      await proxy.prepareSwitch(other, const Duration(seconds: 7)),
+      isTrue,
+    );
+    expect(notes, contains('video 从 7 秒开始：先下载字节 $second 起的窗口'));
+    expect(notes, contains('audio 从 7 秒开始：先下载字节 $second 起的窗口'));
+    int asked(int at) => requests.where((r) => r.$2 == at).length;
+    // What the video starts on is in: mpv's requests bring no new ones.
+    final before = asked(second);
+    expect(before, greaterThan(0));
+    final head0 = await fetch(other, range: 'bytes=0-1023');
+    expect(head0.$2, source.sublist(0, 1024));
+    final video = await fetch(other, range: 'bytes=$second-');
+    expect(video.$2, source.sublist(second));
+    final sound = await fetch(audio, range: 'bytes=$second-');
+    expect(sound.$2, source.sublist(second));
+    expect(asked(second), before);
+    // Made ready once more (changed back to later): no head again.
+    final heads = asked(0);
+    expect(
+      await proxy.prepareSwitch(other, const Duration(seconds: 12)),
+      isTrue,
+    );
+    expect(asked(0), heads);
+  });
+
+  test(
+    'a track that is not one of the proxy\'s cannot be changed to',
+    () async {
+      final audio = proxy.registerCandidates([
+        endpoint('/good'),
+      ], isAudio: true);
+      expect(
+        await proxy.prepareSwitch(audio, const Duration(seconds: 7)),
+        isFalse,
+      );
+      expect(
+        await proxy.prepareSwitch(
+          'http://127.0.0.1:1/none/9',
+          const Duration(seconds: 7),
+        ),
+        isFalse,
+      );
+      final dead = proxy.registerCandidates([endpoint('/forbidden')], lazy: true);
+      expect(
+        await proxy.prepareSwitch(
+          dead,
+          const Duration(seconds: 7),
+          wait: const Duration(seconds: 2),
+        ),
+        isFalse,
+      );
+    },
+  );
+
   test('a request elsewhere leaves the windows downloaded ahead', () async {
     final url = proxy.registerCandidates([
       endpoint('/good'),

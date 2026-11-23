@@ -325,6 +325,17 @@ abstract final class Pref {
     SettingBoxKey.threadRipperStartQuality,
     defaultValue: true,
   );
+  // And changes quality as it plays, by the speed (RipperQualityWatch).
+  static bool get threadRipperLiveQuality => _setting.get(
+    SettingBoxKey.threadRipperLiveQuality,
+    defaultValue: true,
+  );
+  // A change of quality changes the video track of what plays, the sound
+  // going on (PlPlayerController.switchVideoStream).
+  static bool get threadRipperSeamlessQuality => _setting.get(
+    SettingBoxKey.threadRipperSeamlessQuality,
+    defaultValue: true,
+  );
   static List<String> get threadRipperCustomHosts => List<String>.from(
     _setting.get(
       SettingBoxKey.threadRipperCustomHosts,

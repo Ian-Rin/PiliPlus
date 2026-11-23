@@ -209,6 +209,7 @@ class _VideoDetailPageVState extends State<VideoDetailPageV>
     // The player is shared by the video pages: the one showing owns recovery.
     videoDetailController.plPlayerController
       ..onStreamBrokeOff = _onStreamBrokeOff
+      ..onRipperSpeed = videoDetailController.onRipperSpeed
       ..onNearEnd = _onNearEnd;
   }
 
@@ -362,6 +363,9 @@ class _VideoDetailPageVState extends State<VideoDetailPageV>
       player.onStreamBrokeOff = null;
     }
     if (player.onNearEnd == _onNearEnd) player.onNearEnd = null;
+    if (player.onRipperSpeed == videoDetailController.onRipperSpeed) {
+      player.onRipperSpeed = null;
+    }
 
     Get.delete<HorizontalMemberPageController>(
       tag: videoDetailController.heroTag,

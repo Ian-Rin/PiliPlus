@@ -75,6 +75,7 @@ import 'package:extended_nested_scroll_view/extended_nested_scroll_view.dart'
     show ExtendedNestedScrollViewState;
 import 'package:flutter/foundation.dart' show kDebugMode, compute;
 import 'package:flutter_smart_dialog/flutter_smart_dialog.dart';
+import 'package:thread_ripper/quality_watch.dart';
 import 'package:thread_ripper/speed_memory.dart';
 import 'package:flutter_volume_controller/flutter_volume_controller.dart';
 import 'package:get/get.dart';
@@ -724,11 +725,7 @@ class VideoDetailController extends GetxController
   void updatePlayer() {
     final currentVideoQa = this.currentVideoQa.value;
     if (currentVideoQa == null) return;
-    _autoPlay.value = true;
-    playedTime = plPlayerController.videoPlayerController?.state.position;
-    plPlayerController
-      ..isBuffering.value = false
-      ..buffered.value = 0;
+    final audioBefore = audioUrl;
 
     firstVideo = findVideoByQa(currentVideoQa.code, setCodecs: true);
     videoUrl = VideoUtils.getCdnUrl(firstVideo.playUrls);
@@ -742,7 +739,114 @@ class VideoDetailController extends GetxController
       audioUrl = VideoUtils.getCdnUrl(firstAudio.playUrls, isAudio: true);
     }
 
-    playerInit();
+    void reopen() {
+      _autoPlay.value = true;
+      playedTime = plPlayerController.videoPlayerController?.state.position;
+      plPlayerController
+        ..isBuffering.value = false
+        ..buffered.value = 0;
+      playerInit();
+    }
+
+    // Only the picture's quality changes: the player changes its video
+    // track with the sound going on, where the file playing has that
+    // quality as a track (PlPlayerController.switchVideoStream). Opened
+    // again as before where it has not, or where that did not bring a
+    // picture.
+    final turn = ++_qualityTurn;
+    if (audioUrl == audioBefore && !isFileSource && data.dash != null) {
+      plPlayerController
+          .switchVideoStream(firstVideo.id, _networkSource())
+          .then(
+            (done) {
+              if (!done && turn == _qualityTurn) reopen();
+            },
+            onError: (Object _) {
+              if (turn == _qualityTurn) reopen();
+            },
+          );
+      return;
+    }
+    reopen();
+  }
+
+  /// Counts the changes of quality: one that fails after a later one was
+  /// asked for leaves the reopening to that one.
+  int _qualityTurn = 0;
+
+  /// What the player is given to play, as the page has it now.
+  NetworkSource _networkSource() {
+    final audioItem = data.dash?.audio
+        ?.where(
+          (item) =>
+              item.id == currentAudioQa?.code &&
+              audioUrl == VideoUtils.getCdnUrl(item.playUrls, isAudio: true),
+        )
+        .firstOrNull;
+    final videoBitrate = data.dash != null ? firstVideo.bandWidth : null;
+    final proxied =
+        data.dash != null &&
+        _ripperEpisodeAllowed &&
+        videoUrl == VideoUtils.getCdnUrl(firstVideo.playUrls);
+    return NetworkSource(
+      videoSource: videoUrl!,
+      audioSource: audioUrl,
+      videoCandidates: proxied ? firstVideo.playUrls.toList() : null,
+      audioCandidates: audioItem?.playUrls.toList(),
+      bitrate: videoBitrate == null || videoBitrate <= 0
+          ? null
+          : videoBitrate + (audioItem?.bandWidth ?? 0),
+      videoQuality: proxied ? firstVideo.id : null,
+      videoAlternates: proxied ? _otherQualities() : null,
+    );
+  }
+
+  /// The video's other qualities, each the stream that would play at it
+  /// (its codec's, as for the one playing): tracks the player can change
+  /// to without opening the video again.
+  List<VideoAlternate>? _otherQualities() {
+    if (!Pref.threadRipperSeamlessQuality) return null;
+    final videos = data.dash?.video;
+    if (videos == null) return null;
+    try {
+      final seen = {firstVideo.id};
+      final others = <VideoAlternate>[];
+      for (final video in videos) {
+        if (!seen.add(video.id)) continue;
+        final stream = findVideoByQa(video.id);
+        final codecs = stream.codecs ?? '';
+        final codec = codecs.startsWith('avc')
+            ? 'h264'
+            : codecs.startsWith('hev') ||
+                  codecs.startsWith('hvc') ||
+                  codecs.startsWith('dvh')
+            ? 'hevc'
+            : codecs.startsWith('av01')
+            ? 'av1'
+            : null;
+        final urls = stream.playUrls.toList();
+        if (codec == null || urls.isEmpty) continue;
+        // "30", "29.970" or "30000/1001".
+        final rate = (stream.frameRate ?? '').split('/');
+        final frames = double.tryParse(rate.first);
+        final per = rate.length > 1 ? double.tryParse(rate[1]) : 1.0;
+        others.add(
+          VideoAlternate(
+            quality: video.id,
+            candidates: urls,
+            codec: codec,
+            width: stream.width,
+            height: stream.height,
+            fps: frames == null || per == null || per <= 0
+                ? null
+                : (frames / per).round(),
+          ),
+        );
+      }
+      return others.isEmpty ? null : others;
+    } catch (_) {
+      return null;
+    }
   }
 
   Future<void>? initPlayerIfNeeded(bool autoFullScreenFlag) {
@@ -768,17 +872,18 @@ class VideoDetailController extends GetxController
     bool? autoplay,
     bool autoFullScreenFlag = false,
   }) async {
+    // Back on a page that has no play address (yet): a log showed "Null
+    // check operator used on a null value" here, called from the page's
+    // didPopNext. The request for the address starts the player itself
+    // when it is answered.
+    if (!isFileSource && videoUrl == null) return;
     Duration? seek = defaultST ?? playedTime;
     if (seek == .zero) seek = null;
+    // Where the history left it (not a change of quality or a reopening,
+    // which go on where the picture is, nor a segment skipped): the
+    // keyframe before will do, and is there sooner.
+    final resumed = seek != null && defaultST != null;
     seek ??= getFirstSegment();
-    final audioItem = data.dash?.audio
-        ?.where(
-          (item) =>
-              item.id == currentAudioQa?.code &&
-              audioUrl == VideoUtils.getCdnUrl(item.playUrls, isAudio: true),
-        )
-        .firstOrNull;
-    final videoBitrate = data.dash != null ? firstVideo.bandWidth : null;
     await plPlayerController.setDataSource(
       isFileSource
           ? FileSource(
@@ -787,21 +892,9 @@ class VideoDetailController extends GetxController
               isMp4: entry.mediaType == 1,
               hasDashAudio: entry.hasDashAudio,
             )
-          : NetworkSource(
-              videoSource: videoUrl!,
-              audioSource: audioUrl,
-              videoCandidates:
-                  data.dash != null &&
-                      _ripperEpisodeAllowed &&
-                      videoUrl == VideoUtils.getCdnUrl(firstVideo.playUrls)
-                  ? firstVideo.playUrls.toList()
-                  : null,
-              audioCandidates: audioItem?.playUrls.toList(),
-              bitrate: videoBitrate == null || videoBitrate <= 0
-                  ? null
-                  : videoBitrate + (audioItem?.bandWidth ?? 0),
-            ),
+          : _networkSource(),
       seekTo: seek,
+      keyframeStart: resumed,
       duration: data.timeLength == null
           ? null
           : Duration(milliseconds: data.timeLength!),
@@ -885,6 +978,23 @@ class VideoDetailController extends GetxController
     if (!Pref.threadRipperStartQuality || videos.isEmpty) return want;
     final kbps = RipperSpeed.known();
     if (kbps == null) return want;
+    final offered = _offeredStreams(videos, response, want);
+    if (offered == null) return want;
+    final picked = RipperSpeedMemory.pick(offered, kbps);
+    // The quality set, not the one nearest to it that the video has: the
+    // caller looks that up as before.
+    return picked == offered.first.quality ? want : picked;
+  }
+
+  /// The stream that plays at the quality set ([want]), then those of the
+  /// qualities below it, best first, each with its bitrate: what a speed
+  /// chooses among (RipperSpeedMemory.pick, [RipperQualityWatch]). Null if
+  /// the streams cannot be told.
+  List<({int quality, int bandwidth})>? _offeredStreams(
+    List<VideoItem> videos,
+    PlayUrlModel response,
+    int want,
+  ) {
     try {
       // The stream that would play at a quality: its codec's, as picked.
       VideoItem streamAt(int quality) => VideoUtils.findTargetVideo(
@@ -900,19 +1010,78 @@ class VideoDetailController extends GetxController
               .where((quality) => quality < first.id)
               .toList()
             ..sort((a, b) => b.compareTo(a));
-      final offered = [
+      return [
         (quality: first.id, bandwidth: first.bandWidth ?? 0),
         for (final quality in below)
           if (streamAt(quality) case final stream when stream.id == quality)
             (quality: quality, bandwidth: stream.bandWidth ?? 0),
       ];
-      final picked = RipperSpeedMemory.pick(offered, kbps);
-      // The quality set, not the one nearest to it that the video has: the
-      // caller looks that up as before.
-      return picked == first.id ? want : picked;
     } catch (_) {
-      return want;
+      return null;
     }
+  }
+
+  /// Changes the quality of the video playing by the download speed, from
+  /// its start to its end; null where there is nothing to choose among, or
+  /// once the viewer has chosen a quality by hand.
+  RipperQualityWatch? _qualityWatch;
+
+  /// A speed the proxy measured, in the foreground (PlPlayerController's
+  /// onRipperSpeed, set by the page showing).
+  void onRipperSpeed(int kbps, {required bool sustained}) {
+    final watch = _qualityWatch;
+    if (watch == null || !Pref.threadRipperLiveQuality) return;
+    final player = plPlayerController;
+    if (isQuerying ||
+        player.processing ||
+        player.switchingVideoStream ||
+        isFileSource) {
+      return;
+    }
+    // Not the quality the watch has: chosen by hand, and left at that.
+    if (currentVideoQa.value?.code != watch.current) {
+      _qualityWatch = null;
+      return;
+    }
+    // A change starts playback, and a paused video is to stay paused.
+    final state = player.videoPlayerController?.state;
+    if (state == null || !player.playerStatus.isPlaying) return;
+    // Not for the last half minute.
+    if (state.duration > Duration.zero &&
+        state.duration - state.position < const Duration(seconds: 30)) {
+      return;
+    }
+    final from = watch.current;
+    final to = watch.speed(
+      kbps,
+      sustained: sustained,
+      now: DateTime.now(),
+      // Held down for a faster look, it is the speed set that counts.
+      rate: player.longPressStatus.value
+          ? player.lastPlaybackSpeed
+          : player.playbackSpeed,
+    );
+    if (to == null) return;
+    if (data.dash?.video?.any((video) => video.id == to) != true) {
+      _qualityWatch = null;
+      return;
+    }
+    final speed = (kbps / 1000).toStringAsFixed(1);
+    final fromName = VideoQuality.fromCode(from).shortDesc;
+    final toName = VideoQuality.fromCode(to).shortDesc;
+    final down = to < from;
+    Utils.reportError(
+      '[画质调整] ${down ? '降' : '升'}：$fromName → $toName，'
+      '下载速度约 $speed Mbit/s（${sustained ? '播放等下载时测到' : '单个窗口的速度'}），'
+      '码率 ${(firstVideo.bandWidth ?? 0) ~/ 1000} kbit/s，'
+      '位置 ${state.position.inSeconds}s / ${state.duration.inSeconds}s',
+    );
+    SmartDialog.showToast(
+      down ? '网速约 $speed Mbit/s，画质降到 $toName' : '网速够用了，画质升到 $toName',
+      displayTime: const Duration(seconds: 2),
+    );
+    currentVideoQa.value = VideoQuality.fromCode(to);
+    updatePlayer();
   }
 
   /// Told to the viewer, and to the start's log: the video starts below
@@ -1262,6 +1431,17 @@ class VideoDetailController extends GetxController
       firstVideo = targetVideo;
       currentDecodeFormats = targetDecode;
       currentVideoQa.value = VideoQuality.fromCode(targetQuality);
+      // A new video: watched from the quality it starts on, up to the one
+      // set. Opened again, the watch it has goes on.
+      if (!fromReset) {
+        final offered = _offeredStreams(video, response, cacheVideoQa);
+        _qualityWatch =
+            offered != null &&
+                offered.length > 1 &&
+                offered.any((stream) => stream.quality == targetQuality)
+            ? RipperQualityWatch(offered: offered, current: targetQuality)
+            : null;
+      }
       _setVideoHeight();
       videoUrl = VideoUtils.getCdnUrl(firstVideo.playUrls);
 

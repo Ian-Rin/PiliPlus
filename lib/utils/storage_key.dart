@@ -9,6 +9,8 @@ abstract final class SettingBoxKey {
   static const threadRipperAutoConcurrency = 'threadRipperAutoConcurrency';
   static const threadRipperCustomHosts = 'threadRipperCustomHosts';
   static const threadRipperStartQuality = 'threadRipperStartQuality';
+  static const threadRipperLiveQuality = 'threadRipperLiveQuality';
+  static const threadRipperSeamlessQuality = 'threadRipperSeamlessQuality';
   // Not settings: the download speed last measured (RipperSpeed).
   static const ripperSpeedWifi = 'ripperSpeedWifi';
   static const ripperSpeedCellular = 'ripperSpeedCellular';
