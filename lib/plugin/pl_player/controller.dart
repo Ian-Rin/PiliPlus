@@ -42,6 +42,7 @@ import 'package:PiliPlus/utils/extension/box_ext.dart';
 import 'package:PiliPlus/utils/extension/native_geometry_ext.dart';
 import 'package:PiliPlus/utils/extension/num_ext.dart';
 import 'package:PiliPlus/utils/feed_back.dart';
+import 'package:PiliPlus/utils/flight_exit.dart';
 import 'package:PiliPlus/utils/flight_log.dart';
 import 'package:PiliPlus/utils/flight_mode.dart';
 import 'package:PiliPlus/utils/image_utils.dart';
@@ -2150,6 +2151,10 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
   /// answers at once and keeps its connection.
   static void warmCdn() {
     if (!Pref.threadRipperEnabled) return;
+    // 机上模式: where the link comes out, for the nodes below and for the
+    // proxy's ([_newRipperProxy]).
+    FlightExit.refresh();
+    final inMainland = FlightExit.mainland == true;
     final now = DateTime.now();
     // Warm still (connections stay a minute), or in use.
     if (now.difference(_warmedAt) < const Duration(seconds: 30)) return;
@@ -2158,7 +2163,9 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
         .map(RipperCdnResolver.normalizeHost)
         .whereType<String>()
         .toList();
-    final hosts = custom.isNotEmpty
+    final hosts = inMainland
+        ? RipperCdnResolver.mainlandHosts.take(4)
+        : custom.isNotEmpty
         ? custom.take(4)
         : switch (Pref.threadRipperRegion) {
             RipperRegion.overseas => RipperCdnResolver.overseasHosts.take(4),
@@ -2190,21 +2197,29 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
   /// 机上模式: four connections whatever is set, none added as it stalls
   /// (each is a share of the same link, and one more handshake), and the
   /// proxy's timings for a slow link ([BtrRangeProxy.slowLink]). The nodes
-  /// are those set: where such a link comes out is not known beforehand.
+  /// are the mainland's while the link is known to come out there
+  /// (FlightExit, which says why), whatever region or nodes are set;
+  /// those set otherwise.
   BtrRangeProxy _newRipperProxy() {
     final flight = FlightMode.on;
+    FlightExit.refresh();
+    final inMainland = FlightExit.mainland == true;
     return BtrRangeProxy(
         client: _ripperClient
           ..connectionTimeout = BtrRangeProxy.connectTimeout(slowLink: flight),
-        concurrency: flight ? 4 : Pref.threadRipperConcurrency,
-        overseas: Pref.threadRipperOverseas,
-        overseasStart: Pref.threadRipperRegion == RipperRegion.auto,
-        customHosts: Pref.threadRipperCustomHosts,
+        concurrency: flight
+            ? FlightMode.tuner?.concurrency ?? 4
+            : Pref.threadRipperConcurrency,
+        overseas: !inMainland && Pref.threadRipperOverseas,
+        overseasStart:
+            !inMainland && Pref.threadRipperRegion == RipperRegion.auto,
+        customHosts: inMainland ? const [] : Pref.threadRipperCustomHosts,
         autoConcurrency: !flight && Pref.threadRipperAutoConcurrency
             ? _ripperAutoConcurrency
             : null,
         userAgent: BrowserUa.pc,
         slowLink: flight,
+        tuner: flight ? FlightMode.tuner : null,
       )
       ..onGaveUp = _noteProxyGaveUp
       // What the connection does, for the quality the next video starts on.
@@ -2230,6 +2245,14 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     if (FlightMode.on) {
       if (!(sustained && DateTime.now().isBefore(_speedQuietUntil))) {
         FlightMode.noteSpeed(kbps);
+        // And for the connections ([FlightMode.tuner]): another count is
+        // tried only while playback is not waiting on the download.
+        if (sustained) {
+          FlightMode.tuner?.noteSpeed(
+            kbps,
+            mayExplore: _videoPlayerController?.state.buffering == false,
+          );
+        }
       }
       return;
     }
@@ -2625,6 +2648,7 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
         ...Pref.initBuffer(
           _playbackSpeed.value,
           dataSource is NetworkSource ? dataSource.bitrate : null,
+          FlightMode.bufferSeconds,
         ),
       'video-rotate': ?rotate?.toString(),
       // mpv takes a connection that breaks off for the end of the stream: of
@@ -3031,6 +3055,7 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     if (!FlightLog.recording) return;
     FlightLog.add('open', {
       'q': source.videoQuality,
+      'cn': FlightExit.mainland,
       'so': onlyPlayAudio.value,
       'px': _ripperProxy != null,
       'kb': (source.bitrate ?? 0) ~/ 1000,
@@ -4143,6 +4168,7 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
       ...Pref.initBuffer(
         speed,
         source is NetworkSource ? source.bitrate : null,
+        FlightMode.bufferSeconds,
       ),
       // 机上模式's is longer than any of these (see [_createVideoController]).
       'cache-pause-wait': FlightMode.on

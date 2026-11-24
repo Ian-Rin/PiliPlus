@@ -10,8 +10,10 @@
 // (`# 2026-12-01 ...`). The kinds:
 //   hb 712 | hb x          a small request every 15 s: its time in ms, or
 //                          that it failed (the link was gone)
-//   open q= so= px= kb=    a video opened: quality, sound alone, through
-//                          the proxy, bitrate of picture and sound (kbit/s)
+//   open q= cn= so= px= kb=   a video opened: quality, the link coming
+//                          out in the mainland (its nodes are then used),
+//                          sound alone, through the proxy, bitrate of
+//                          picture and sound (kbit/s)
 //   first ms= open=        its first moving picture, from the press and
 //                          from the player being given it
 //   play ms=               it plays (its sound alone too), from the press,
@@ -32,6 +34,10 @@
 //                          quality above the lowest, and back), broke (a
 //                          stream, opened again), gaveup (the proxy, on a
 //                          piece), bg, fg, on, off
+//   tune time|conn|buffer ...   the tuner changed the proxy's timings
+//                          (by the slowest tenth of the first bytes), its
+//                          connections (with each count's median speed),
+//                          or the download ahead (after an outage)
 //   probe key=value        the network test's results
 
 /// See the head of this file.
@@ -137,6 +143,10 @@ class _Summary {
   final _api90 = <int>[];
 
   final _probes = <String>[];
+
+  // What the tuner changed: how often, and the last of each kind.
+  int _tuned = 0;
+  final _tunes = <String, String>{};
 
   /// A heartbeat later than this after the one before was not the next
   /// one: the app was away, and what the link did meanwhile is not known.
@@ -247,6 +257,11 @@ class _Summary {
         if (line.words.isNotEmpty) {
           _events.update(line.words.first, (n) => n + 1, ifAbsent: () => 1);
           if (line.words.first == 'raise') _raised++;
+        }
+      case 'tune':
+        _tuned++;
+        if (line.words.isNotEmpty) {
+          _tunes[line.words.first] = line.words.sublist(1).join(' ');
         }
       case 'probe':
         _probes.add(line.words.join(' '));
@@ -428,6 +443,7 @@ class _Summary {
         'down': '升档后退回',
         'broke': '断流重开',
         'gaveup': '代理放弃',
+        'exit': '出口变化',
         'bg': '切到后台',
         'fg': '回到前台',
         'on': '开机上模式',
@@ -437,6 +453,14 @@ class _Summary {
         '事件：${[
           for (final MapEntry(:key, :value) in _events.entries) '${names[key] ?? key} $value',
         ].join('，')}',
+      );
+    }
+    if (_tuned > 0) {
+      const names = {'time': '超时', 'conn': '连接数', 'buffer': '缓冲'};
+      out.add(
+        '自动调参：$_tuned 次，最后一次 ${[
+          for (final MapEntry(:key, :value) in _tunes.entries) '${names[key] ?? key}（$value）',
+        ].join('；')}',
       );
     }
     for (final probe in _probes) {

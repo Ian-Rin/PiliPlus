@@ -8,6 +8,7 @@ import 'package:test/test.dart';
 import 'package:thread_ripper/auto_concurrency.dart';
 import 'package:thread_ripper/btr/http_fetch.dart';
 import 'package:thread_ripper/btr/range_proxy.dart';
+import 'package:thread_ripper/link_tuner.dart';
 
 /// An ftyp box, then a version-0 sidx (timescale ms): [sizes] and
 /// [durations] of the fragments, the first right after the sidx.
@@ -556,6 +557,32 @@ void main() {
     final stats = proxy.takeStats();
     expect(stats.failed, greaterThan(0));
     expect(stats.requests, greaterThan(stats.failed));
+  });
+
+  test('a slow link with a tuner: its connections, and it is told', () async {
+    final tuner = RipperLinkTuner();
+    // One speed measured: the next count in turn, two, is tried.
+    tuner.noteSpeed(1000, mayExplore: true);
+    expect(tuner.concurrency, 2);
+    proxy.close();
+    proxy = BtrRangeProxy(
+      userAgent: 'test',
+      prefetchHeads: false,
+      slowLink: true,
+      tuner: tuner,
+    );
+    await proxy.start();
+    final video = proxy.registerCandidates([endpoint('/good')]);
+    final audio = proxy.registerCandidates([endpoint('/good')], isAudio: true);
+    final results = await Future.wait([fetch(video), fetch(audio)]);
+    expect(results[0].$2, source);
+    expect(results[1].$2, source);
+    expect(proxy.concurrency, 2);
+    expect(peak, lessThanOrEqualTo(2));
+    // Every request's first byte was passed on: enough to go by.
+    expect(tuner.firstByteP90, isNotNull);
+    expect(tuner.timeoutShare, 0);
+    expect(tuner.longestOutageSeconds, 0);
   });
 
   // While nothing is being written (a slow CDN), only the closed socket tells

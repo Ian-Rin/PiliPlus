@@ -16,6 +16,7 @@ import 'package:PiliPlus/services/account_service.dart';
 import 'package:PiliPlus/utils/extension/get_ext.dart';
 import 'package:PiliPlus/utils/extension/iterable_ext.dart';
 import 'package:PiliPlus/utils/feed_back.dart';
+import 'package:PiliPlus/utils/flight_exit.dart';
 import 'package:PiliPlus/utils/flight_log.dart';
 import 'package:PiliPlus/utils/storage.dart';
 import 'package:PiliPlus/utils/storage_key.dart';
@@ -77,8 +78,10 @@ class MainController extends GetxController
     if (Pref.autoUpdate && !Pref.flightMode) {
       Update.checkUpdate();
     }
-    // 机上模式's record of the link goes on from where the app is started.
+    // 机上模式's record of the link goes on from where the app is started,
+    // and where the link comes out is asked before the first video.
     FlightLog.sync();
+    FlightExit.refresh();
 
     setNavBarConfig();
 

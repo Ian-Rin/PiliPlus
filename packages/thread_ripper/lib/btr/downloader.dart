@@ -63,7 +63,22 @@ class RipperDownloadSettings {
     this.stallTimeoutMs = 4000,
     this.attemptTimeoutMs = 15000,
     this.hedgeDelayMs = 900,
-  }) : slowLink = false;
+  }) : slowLink = false,
+       _slowHedgeFloorMs = slowHedgeFloorMs,
+       _slowRaceGapMs = slowRaceGapMs;
+
+  /// The slow link's figures as first set: for a first byte that takes
+  /// about two seconds at its slowest tenth (RipperLinkTuner sets them by
+  /// what the link does).
+  static const slowFirstByteTimeoutMs = 15000;
+  static const slowStallTimeoutMs = 12000;
+  static const slowHedgeDelayMs = 6000;
+  static const slowHedgeFloorMs = 3000;
+  static const slowRaceGapMs = 2500;
+
+  /// The connections a slow link may be given (a count the settings offer
+  /// is not asked of it: [normalized]).
+  static const slowMostConcurrency = 8;
 
   /// Not upstream's: for a link like an airliner's satellite Wi-Fi (the
   /// app's 机上模式). Measured on such flights: 0.6 to 0.8 s there and back,
@@ -87,14 +102,19 @@ class RipperDownloadSettings {
   ///   again for minutes ([pieceRounds], [pieceRetryWindowMs]).
   /// - Connections: few, each a share of the same shaped link, and each
   ///   more is one more handshake.
-  const RipperDownloadSettings.slowLink({this.concurrency = 4})
-    : autoConcurrency = false,
-      minChunkBytes = 64 * 1024,
-      firstByteTimeoutMs = 15000,
-      stallTimeoutMs = 12000,
-      attemptTimeoutMs = 60000,
-      hedgeDelayMs = 6000,
-      slowLink = true;
+  const RipperDownloadSettings.slowLink({
+    this.concurrency = 4,
+    this.firstByteTimeoutMs = slowFirstByteTimeoutMs,
+    this.stallTimeoutMs = slowStallTimeoutMs,
+    this.hedgeDelayMs = slowHedgeDelayMs,
+    int hedgeFloorMs = slowHedgeFloorMs,
+    int raceGapMs = slowRaceGapMs,
+  }) : autoConcurrency = false,
+       minChunkBytes = 64 * 1024,
+       attemptTimeoutMs = 60000,
+       slowLink = true,
+       _slowHedgeFloorMs = hedgeFloorMs,
+       _slowRaceGapMs = raceGapMs;
 
   static const allowedConcurrency = [4, 8, 16, 32, 64, 128];
 
@@ -111,11 +131,13 @@ class RipperDownloadSettings {
 
   /// The least a piece waits for its second copy, however fast pieces have
   /// been.
-  int get hedgeFloorMs => slowLink ? 3000 : 250;
+  int get hedgeFloorMs => slowLink ? _slowHedgeFloorMs : 250;
+  final int _slowHedgeFloorMs;
 
   /// Between the copies of a raced request (a start's head and first
   /// piece): 0 is upstream's race, all at once or within 300 ms.
-  int get raceGapMs => slowLink ? 2500 : 0;
+  int get raceGapMs => slowLink ? _slowRaceGapMs : 0;
+  final int _slowRaceGapMs;
 
   final int concurrency;
 
@@ -128,19 +150,31 @@ class RipperDownloadSettings {
   final int hedgeDelayMs;
 
   /// normalizeSettings: a thread count the settings do not offer becomes 8;
-  /// the timings are upstream's constants.
+  /// the timings are upstream's constants. A slow link's settings are kept
+  /// as they are, timings and all (they are set by what the link does),
+  /// with one to [slowMostConcurrency] connections.
   RipperDownloadSettings normalized() {
+    if (slowLink) {
+      return concurrency >= 1 && concurrency <= slowMostConcurrency
+          ? this
+          : withConcurrency(concurrency.clamp(1, slowMostConcurrency));
+    }
     final threads = allowedConcurrency.contains(concurrency) ? concurrency : 8;
-    return slowLink
-        ? RipperDownloadSettings.slowLink(concurrency: threads)
-        : RipperDownloadSettings(
-            concurrency: threads,
-            autoConcurrency: autoConcurrency,
-          );
+    return RipperDownloadSettings(
+      concurrency: threads,
+      autoConcurrency: autoConcurrency,
+    );
   }
 
   RipperDownloadSettings withConcurrency(int concurrency) => slowLink
-      ? RipperDownloadSettings.slowLink(concurrency: concurrency)
+      ? RipperDownloadSettings.slowLink(
+          concurrency: concurrency,
+          firstByteTimeoutMs: firstByteTimeoutMs,
+          stallTimeoutMs: stallTimeoutMs,
+          hedgeDelayMs: hedgeDelayMs,
+          hedgeFloorMs: _slowHedgeFloorMs,
+          raceGapMs: _slowRaceGapMs,
+        )
       : RipperDownloadSettings(
           concurrency: concurrency,
           autoConcurrency: autoConcurrency,

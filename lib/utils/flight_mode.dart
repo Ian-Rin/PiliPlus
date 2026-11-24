@@ -1,6 +1,8 @@
 import 'package:PiliPlus/models/common/video/base_quality.dart';
+import 'package:PiliPlus/utils/flight_log.dart';
 import 'package:PiliPlus/utils/storage_pref.dart';
 import 'package:thread_ripper/link_speed.dart';
+import 'package:thread_ripper/link_tuner.dart';
 
 /// 机上模式: for an airliner's satellite Wi-Fi (设置 → 播放器设置).
 ///
@@ -17,6 +19,9 @@ import 'package:thread_ripper/link_speed.dart';
 ///   ([carries]); back on the lowest, there and then, if that did not play.
 /// - What the link and playback do is written down (FlightLog), to set
 ///   this mode's figures by after the flight.
+/// - Meanwhile the figures that can be set from what the link does are
+///   ([tuner]): the proxy's timeouts, its connections, and how far ahead
+///   the player downloads.
 /// - It plays through the thread-ripper proxy with a slow link's timings
 ///   (BtrRangeProxy.slowLink): few connections, nothing asked for twice,
 ///   long timeouts, and a link that is gone waited out, not given up.
@@ -105,6 +110,26 @@ abstract final class FlightMode {
   /// The raised quality did not play: none is raised for ten minutes.
   static void raiseFailed() => _link.failed();
 
+  // -------------------------------------------------------------------
+  // The proxy's timings and connections, and the download ahead, by what
+  // the link does (RipperLinkTuner, which says how).
+
+  static RipperLinkTuner _tuner = _newTuner();
+
+  static RipperLinkTuner _newTuner() => RipperLinkTuner(
+    // Every change goes into the record, to be looked at after the flight.
+    onChange: (what) => FlightLog.add('tune $what'),
+  );
+
+  /// The one tuner, for every video's proxy; null while the setting is off
+  /// (the figures are then the ones first set).
+  static RipperLinkTuner? get tuner =>
+      on && Pref.flightAutoTune ? _tuner : null;
+
+  /// How far ahead the player downloads, in seconds.
+  static int get bufferSeconds =>
+      tuner?.bufferSeconds ?? RipperLinkTuner.leastBufferSeconds;
+
   /// The viewer turned 听视频 on or off: theirs from here on.
   static void viewerChose({required bool soundOnly}) {
     byFallback = false;
@@ -118,5 +143,6 @@ abstract final class FlightMode {
     _soundOnlyUntil = null;
     _pictureKeptUntil = null;
     _link.clear();
+    _tuner = _newTuner();
   }
 }

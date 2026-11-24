@@ -143,6 +143,10 @@ void main() {
         '00:01:30 ev down q=16',
         '00:02:00 ev giveup wait=20',
         '00:02:01 open q=16 so=1 px=1 kb=64',
+        '00:02:10 tune time p90=900 to=0 fb=8000 stall=8000 hedge=3000/2000 gap=1500',
+        '00:02:20 tune conn 4>2 4=1000 2=? 6=?',
+        '00:02:30 tune conn 2>6 4=1000 2=900 6=?',
+        '00:02:40 tune buffer out=300 secs=720',
         '00:03:00 probe tcp=3/4/3 rtt=640/700/910',
       ]);
       expect(text, contains('跨 3.3 分钟'));
@@ -161,6 +165,10 @@ void main() {
       expect(text, contains('接口请求：5 个，失败 20.0%；中位 900 / 九成 2500 毫秒'));
       expect(text, contains('升一档 1，升档后退回 1'));
       expect(text, contains('放弃画面 1'));
+      expect(text, contains('自动调参：4 次'));
+      expect(text, contains('连接数（2>6 4=1000 2=900 6=?）'));
+      expect(text, contains('缓冲（out=300 secs=720）'));
+      expect(text, contains('超时（p90=900 to=0 fb=8000'));
       expect(text, contains('网络测试：tcp=3/4/3 rtt=640/700/910'));
     });
 

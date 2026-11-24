@@ -19,6 +19,7 @@ import 'package:PiliPlus/services/service_locator.dart';
 import 'package:PiliPlus/utils/android/android_helper.dart';
 import 'package:PiliPlus/utils/desktop/window_controller.dart';
 import 'package:PiliPlus/utils/extension/num_ext.dart';
+import 'package:PiliPlus/utils/flight_exit.dart';
 import 'package:PiliPlus/utils/flight_log.dart';
 import 'package:PiliPlus/utils/flight_mode.dart';
 import 'package:PiliPlus/utils/ios/pip_helper.dart';
@@ -47,6 +48,8 @@ List<SettingsModel> get playSettings => [
       // Before the record stops with the mode, after it starts with it.
       if (!val) FlightLog.event('off');
       FlightMode.reset();
+      FlightExit.reset();
+      FlightExit.refresh();
       Request.applyFlightMode();
       FlightLog.sync();
       if (val) FlightLog.event('on');
@@ -64,6 +67,17 @@ List<SettingsModel> get playSettings => [
         '套餐有流量上限时可以关掉',
     leading: Icon(Icons.hd_outlined),
     setKey: SettingBoxKey.flightRaiseQuality,
+    defaultVal: true,
+  ),
+  // FlightMode.tuner.
+  const SwitchModel(
+    title: '机上模式：按现场自动调参数',
+    subtitle:
+        '按实际测到的情况调：首字节慢就把超时放长、快就收短；'
+        '断网久了就多缓冲（十到二十分钟）；轮流试 2、4、6 条连接，用最快的。'
+        '关掉就用固定值（超时 15 秒、4 条连接、缓冲十分钟）',
+    leading: Icon(Icons.tune_outlined),
+    setKey: SettingBoxKey.flightAutoTune,
     defaultVal: true,
   ),
   // FlightLog.

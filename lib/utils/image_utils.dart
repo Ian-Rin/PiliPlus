@@ -210,7 +210,14 @@ abstract final class ImageUtils {
     r'(@(\d+[a-z]_?)*)(\..*)?$',
     caseSensitive: false,
   );
-  static String thumbnailUrl(String? src, [int maxQuality = 1]) {
+  static final _sizedRegex = RegExp(r'\d+[wh]', caseSensitive: false);
+
+  /// [width]: no wider than this many pixels (`@320w_10q.webp`), where the
+  /// address does not say a size already. Without it a picture comes as
+  /// large as it was uploaded, and the quality alone is lowered: six
+  /// covers of the popular list measured 12 to 78 KB each at `@10q`, 2 to
+  /// 12 KB at `@480w_10q`. Pictures narrower than [width] come as they are.
+  static String thumbnailUrl(String? src, [int maxQuality = 1, int? width]) {
     if (src != null && maxQuality != 100) {
       maxQuality = math.max(maxQuality, GlobalData().imgQuality);
       bool hasMatch = false;
@@ -219,14 +226,18 @@ abstract final class ImageUtils {
         onMatch: (match) {
           hasMatch = true;
           String suffix = match.group(3) ?? '.webp';
-          return '${match.group(1)}_${maxQuality}q$suffix';
+          final params = match.group(1)!;
+          final size = width == null || _sizedRegex.hasMatch(params)
+              ? ''
+              : '_${width}w';
+          return '$params${size}_${maxQuality}q$suffix';
         },
         onNonMatch: (String str) {
           return str;
         },
       );
       if (!hasMatch) {
-        src += '@${maxQuality}q.webp';
+        src += '@${width == null ? '' : '${width}w_'}${maxQuality}q.webp';
       }
     }
     return src.http2https;

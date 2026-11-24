@@ -15,6 +15,7 @@ abstract final class SettingBoxKey {
   static const flightMode = 'flightMode';
   static const flightRaiseQuality = 'flightRaiseQuality';
   static const flightMeasure = 'flightMeasure';
+  static const flightAutoTune = 'flightAutoTune';
   // Not settings: the download speed last measured (RipperSpeed).
   static const ripperSpeedWifi = 'ripperSpeedWifi';
   static const ripperSpeedCellular = 'ripperSpeedCellular';

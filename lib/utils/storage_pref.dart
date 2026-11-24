@@ -297,6 +297,11 @@ abstract final class Pref {
   static bool get flightRaiseQuality =>
       _setting.get(SettingBoxKey.flightRaiseQuality, defaultValue: true);
 
+  /// 机上模式: its timings, connections and download ahead follow what the
+  /// link does (FlightMode.tuner).
+  static bool get flightAutoTune =>
+      _setting.get(SettingBoxKey.flightAutoTune, defaultValue: true);
+
   /// 机上模式: what the link and playback do is written down (FlightLog).
   static bool get flightMeasure =>
       _setting.get(SettingBoxKey.flightMeasure, defaultValue: true);
@@ -947,7 +952,7 @@ abstract final class Pref {
 
   /// 机上模式's cache ahead (see [initBuffer]).
   static const _flightBufferSec = 600;
-  static const _maxFlightBuffer = 64 * 0x100000;
+  static const _maxFlightBuffer = 96 * 0x100000;
   static const _maxFlightBackBuffer = 48 * 0x100000;
 
   /// Behind the playhead, in seconds of the average bitrate: what keeps a
@@ -968,9 +973,13 @@ abstract final class Pref {
   /// video and audio) the size is raised to hold [bufferSec] of it, a quarter
   /// more for its peaks, up to 48 MB; behind the playhead [_backSec] of it,
   /// up to 96 MB, for seeks back. [bufferSize] stays the least.
+  ///
+  /// [flightAheadSec]: 机上模式's seconds ahead where they follow the link
+  /// (FlightMode.bufferSeconds): ten minutes without.
   static Map<String, String> initBuffer([
     double playbackSpeed = 1.0,
     int? bitrate,
+    int? flightAheadSec,
   ]) {
     final bufSec = Pref.bufferSec * playbackSpeed;
     final least = (Pref.bufferSize * 0x100000).round();
@@ -987,8 +996,9 @@ abstract final class Pref {
       // through that is what was downloaded before. Ten minutes ahead (a
       // quarter of a megabyte a minute of sound, two of the lowest
       // picture), filled again once half a minute of it has played.
+      final aheadSec = flightAheadSec ?? _flightBufferSec;
       final flightAhead = bitrate != null && bitrate > 0
-          ? (bitrate / 8 * _flightBufferSec * 1.25).round()
+          ? (bitrate / 8 * aheadSec * 1.25).round()
           : _maxAutoBuffer;
       // Behind the playhead as much: a song played again (单个循环 seeks
       // to its start), or a look back, comes from the cache, where a seek
@@ -998,8 +1008,8 @@ abstract final class Pref {
           : _maxAutoBuffer;
       return {
         'cache': 'yes',
-        'cache-secs': '$_flightBufferSec',
-        'demuxer-hysteresis-secs': '${_flightBufferSec - 30}',
+        'cache-secs': '$aheadSec',
+        'demuxer-hysteresis-secs': '${aheadSec - 30}',
         'demuxer-max-bytes':
             '${max(ahead, min(flightAhead, _maxFlightBuffer))}',
         'demuxer-max-back-bytes':

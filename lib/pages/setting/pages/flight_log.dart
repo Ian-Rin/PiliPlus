@@ -1,6 +1,7 @@
 import 'dart:io';
 
 import 'package:PiliPlus/utils/flight_log.dart';
+import 'package:PiliPlus/utils/flight_mode.dart';
 import 'package:PiliPlus/utils/flight_probe.dart';
 import 'package:PiliPlus/utils/share_utils.dart';
 import 'package:PiliPlus/utils/utils.dart';
@@ -60,6 +61,11 @@ class _FlightLogPageState extends State<FlightLogPage> {
   }
 
   String get _all => [
+    if (FlightMode.tuner case final tuner?) ...[
+      '现在用的参数：',
+      tuner.describe(),
+      '',
+    ],
     _summary,
     if (_probe.isNotEmpty) ...['', '刚才的网络测试：', ..._probe],
   ].join('\n');
@@ -145,6 +151,13 @@ class _FlightLogPageState extends State<FlightLogPage> {
           if (_probe.isNotEmpty) ...[
             const SizedBox(height: 12),
             Text(_probe.join('\n'), style: theme.textTheme.bodyMedium),
+          ],
+          if (FlightMode.tuner case final tuner?) ...[
+            const SizedBox(height: 16),
+            Text(
+              '现在用的参数（按现场自动调）：\n${tuner.describe()}',
+              style: theme.textTheme.bodyMedium,
+            ),
           ],
           const SizedBox(height: 16),
           Text(_summary, style: theme.textTheme.bodyMedium),

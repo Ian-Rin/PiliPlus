@@ -5,6 +5,7 @@ import 'dart:math';
 
 import 'package:PiliPlus/http/browser_ua.dart';
 import 'package:PiliPlus/plugin/pl_player/controller.dart';
+import 'package:PiliPlus/utils/flight_exit.dart';
 import 'package:PiliPlus/utils/flight_log.dart';
 import 'package:thread_ripper/flight_record.dart';
 
@@ -140,6 +141,16 @@ abstract final class FlightProbe {
       if (zone != null) {
         fields['zone'] = zone;
         tell('出口位置：$zone');
+      }
+      // The same answer says which nodes 机上模式 uses (FlightExit).
+      if (first != null) FlightExit.note(first.$2);
+      switch (FlightExit.mainland) {
+        case true:
+          tell('→ 出口在大陆：机上模式用大陆节点，不管设置的地区是什么');
+        case false:
+          tell('→ 出口不在大陆：节点按设置的地区选');
+        case null:
+          break;
       }
 
       await _speed(tell, fields);

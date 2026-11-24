@@ -1,8 +1,10 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:PiliPlus/build_config.dart';
 import 'package:PiliPlus/http/browser_ua.dart';
+import 'package:PiliPlus/utils/flight_exit.dart';
 import 'package:PiliPlus/utils/flight_mode.dart';
 import 'package:PiliPlus/utils/storage_pref.dart';
 import 'package:flutter/widgets.dart';
@@ -201,7 +203,8 @@ abstract final class FlightLog {
         final request = await client.getUrl(_beatUrl);
         request.headers.set(HttpHeaders.userAgentHeader, BrowserUa.pc);
         final response = await request.close();
-        await response.drain<void>();
+        // A few hundred bytes, which say where the link comes out.
+        FlightExit.note(await response.transform(utf8.decoder).join());
       }().timeout(_beatWithin);
       add('hb ${clock.elapsedMilliseconds}');
     } catch (_) {

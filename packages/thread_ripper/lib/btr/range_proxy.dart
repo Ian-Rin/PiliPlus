@@ -23,6 +23,7 @@ import 'package:thread_ripper/btr/resolver.dart';
 import 'package:thread_ripper/btr/sidx.dart';
 import 'package:thread_ripper/btr/speed_meter.dart';
 import 'package:thread_ripper/cdn_resolver.dart';
+import 'package:thread_ripper/link_tuner.dart';
 
 /// What [BtrRangeProxy.revive] found.
 enum ProxyRevival {
@@ -48,9 +49,11 @@ class BtrRangeProxy {
     this.prefetchHeads = true,
     this.overseasStart = false,
     this.slowLink = false,
+    this.tuner,
     RipperFetch? fetch,
     HttpClient? client,
   }) : assert(!slowLink || autoConcurrency == null),
+       assert(tuner == null || slowLink),
        _client = client ?? newClient(),
        _ownsClient = client == null,
        _settings = slowLink
@@ -64,7 +67,9 @@ class BtrRangeProxy {
         fetch ??
             httpClientFetch(_client, userAgent: userAgent, referer: referer),
       ),
-      getSettings: () => _settings,
+      // A slow link's settings are the tuner's where there is one: its
+      // timings and connections follow what the link does.
+      getSettings: () => tuner?.settings ?? _settings,
       autoConcurrency: autoConcurrency,
       onTransfer: _noteTransfer,
     );
@@ -80,6 +85,15 @@ class BtrRangeProxy {
   int _inFlight = 0;
   int _silentSince = 0;
 
+  /// Since when pieces have been asked for and failed with nothing coming
+  /// in between, and when the last of them failed: the link gone, for
+  /// [tuner], once it is back. To the last failure, not to the first byte
+  /// after it: a piece that failed with nothing asked for afterwards (a
+  /// video made ready and left waiting) is not the link gone for as long
+  /// as nothing was asked.
+  int? _troubleSince;
+  int _troubleLast = 0;
+
   /// The downloader's account of a transfer (a piece asked of a node):
   /// `start` (answered with the id its later events carry), `progress` at
   /// every read, then `done`, `error`, or `cancel` for a copy cut off.
@@ -93,26 +107,38 @@ class BtrRangeProxy {
         if (_inFlight++ == 0) _silentSince = now;
         return id;
       case 'progress':
+        if (_troubleSince case final since?) {
+          _troubleSince = null;
+          tuner?.noteOutage(Duration(milliseconds: _troubleLast - since));
+        }
         _bytesAt = now;
         _stats.bytes += (event['bytes'] as int?) ?? 0;
         if (_awaitingFirstByte.remove(event['id']) case final asked?) {
           if (_stats.firstByteMs.length < RipperLinkStats._kept) {
             _stats.firstByteMs.add(now - asked);
           }
+          tuner?.noteFirstByte(now - asked);
         }
         if (now - _silentSince > _stats.longestSilenceMs) {
           _stats.longestSilenceMs = now - _silentSince;
         }
         _silentSince = now;
       case 'done' || 'error' || 'cancel':
-        _awaitingFirstByte.remove(event['id']);
+        final asked = _awaitingFirstByte.remove(event['id']);
         if (_inFlight > 0) _inFlight--;
         switch (event['phase']) {
           case 'cancel':
             _stats.canceled++;
           case 'error':
             _stats.failed++;
-            if (errorName(event['error']) == 'TimeoutError') _stats.timedOut++;
+            if (errorName(event['error']) == 'TimeoutError') {
+              _stats.timedOut++;
+              tuner?.noteTimeout();
+            }
+            // Gone since it was asked for, or since the last byte of any
+            // piece if that was later: not while another piece came in.
+            _troubleSince ??= max(asked ?? now, _bytesAt ?? 0);
+            _troubleLast = now;
         }
     }
     return null;
@@ -229,6 +255,11 @@ class BtrRangeProxy {
   /// says what was measured there), and windows a quarter the size
   /// ([_windowBytes]). No automatic thread count with it.
   final bool slowLink;
+
+  /// Sets a slow link's timings and connections by what the link does, and
+  /// is told what this proxy's requests see of it (RipperLinkTuner). The
+  /// app's one, shared by the proxies of the videos it plays.
+  final RipperLinkTuner? tuner;
   final RipperDownloadSettings _settings;
   late final RipperDownloader _downloader;
 

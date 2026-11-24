@@ -1,7 +1,10 @@
+import 'dart:math' show max;
+
 import 'package:PiliPlus/common/assets.dart';
 import 'package:PiliPlus/common/style.dart';
 import 'package:PiliPlus/models/common/image_type.dart';
 import 'package:PiliPlus/utils/extension/num_ext.dart';
+import 'package:PiliPlus/utils/flight_mode.dart';
 import 'package:PiliPlus/utils/image_utils.dart';
 import 'package:PiliPlus/utils/storage_pref.dart';
 import 'package:cached_network_image_ce/cached_network_image.dart';
@@ -72,7 +75,7 @@ class NetworkImgLayer extends StatelessWidget {
     }
     return CachedNetworkImage(
       gaplessPlayback: true,
-      imageUrl: ImageUtils.thumbnailUrl(src, quality),
+      imageUrl: ImageUtils.thumbnailUrl(src, quality, _flightWidth),
       width: width,
       height: height,
       memCacheWidth: memCacheWidth,
@@ -89,6 +92,25 @@ class NetworkImgLayer extends StatelessWidget {
           _placeholder(context, isEmote: isEmote, isAvatar: isAvatar),
       colorBlendMode: reduce ? BlendMode.modulate : null,
       color: reduce ? reduceLuxColor : null,
+    );
+  }
+
+  static const _flightWidths = [96, 160, 240, 320, 480];
+
+  /// 机上模式: the picture is asked for at about the size it is shown (two
+  /// pixels a point, the larger of its sides, the next of a few sizes up,
+  /// 480 at most), not as large as it was uploaded. The covers of a page
+  /// of the home feed, of a search or of the history are then some 150 KB
+  /// together where they were 800: seconds less on a link that does
+  /// 1 Mbit/s, and the video's share of it left alone.
+  int? get _flightWidth {
+    if (!FlightMode.on || type == ImageType.emote) return null;
+    final side = max(width, height);
+    if (!side.isFinite || side <= 0) return null;
+    final need = side * 2;
+    return _flightWidths.firstWhere(
+      (w) => w >= need,
+      orElse: () => _flightWidths.last,
     );
   }
 
