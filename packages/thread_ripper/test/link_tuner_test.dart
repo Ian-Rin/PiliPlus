@@ -40,23 +40,27 @@ void main() {
       expect(said, isEmpty);
     });
 
-    test('a slowest tenth of two seconds is what they were set for', () {
+    test('a slowest tenth of two seconds: as first set', () {
+      final first = tuner.settings;
       firstBytes(2000);
       pass(const Duration(seconds: 30));
       final s = tuner.settings;
-      expect(s.firstByteTimeoutMs, 10000);
-      expect(s.stallTimeoutMs, 9000);
+      expect(s.firstByteTimeoutMs, 15000);
+      expect(s.stallTimeoutMs, 12000);
       expect(s.hedgeDelayMs, 6000);
       expect(s.hedgeFloorMs, 3000);
       expect(s.raceGapMs, 2500);
+      expect(identical(s, first), isTrue);
+      expect(said, isEmpty);
     });
 
-    test('a quick link: shorter, down to their floors', () {
+    test('a quick link: a second node sooner, the timeouts as they were', () {
       firstBytes(700);
       pass(const Duration(seconds: 30));
       final s = tuner.settings;
-      expect(s.firstByteTimeoutMs, 8000);
-      expect(s.stallTimeoutMs, 8000);
+      // A timeout that is too short throws away what was waited for.
+      expect(s.firstByteTimeoutMs, 15000);
+      expect(s.stallTimeoutMs, 12000);
       expect(s.hedgeDelayMs, 3000);
       expect(s.hedgeFloorMs, 2000);
       expect(s.raceGapMs, 1500);
@@ -88,6 +92,46 @@ void main() {
       expect(tuner.firstByteP90, 800);
     });
 
+    test('quick to rise: the last requests, whatever the minutes before', () {
+      // Five minutes of a quick link, then it slows.
+      firstBytes(700, 300);
+      expect(tuner.firstByteP90, 700);
+      firstBytes(5000, 7);
+      // Seven in three hundred and seven, but seven of the last sixty.
+      expect(tuner.firstByteP90, 5000);
+      pass(const Duration(seconds: 30));
+      expect(tuner.settings.firstByteTimeoutMs, 22000);
+      expect(tuner.settings.hedgeDelayMs, 12000);
+    });
+
+    test('slow to fall: a slow minute is remembered for ten', () {
+      firstBytes(700, 200);
+      firstBytes(5000, 60);
+      // A quick minute after it: the last sixty are all quick.
+      firstBytes(700, 60);
+      // 60 of 320 were slow.
+      expect(tuner.firstByteP90, 5000);
+      pass(const Duration(seconds: 30));
+      expect(tuner.settings.hedgeDelayMs, 12000);
+      // Ten minutes after the slow ones (two since the last of the quick).
+      pass(const Duration(minutes: 8, seconds: 30));
+      firstBytes(700, 20);
+      expect(tuner.firstByteP90, 700);
+      pass(const Duration(seconds: 30));
+      expect(tuner.settings.hedgeDelayMs, 3000);
+      expect(tuner.settings.firstByteTimeoutMs, 15000);
+    });
+
+    test('ten minutes of requests are kept, not the last sixty', () {
+      // 80 a minute, as on a phone's first record: a slow tenth spread over
+      // them is seen whole.
+      for (var i = 0; i < 800; i++) {
+        tuner.noteFirstByte(i % 8 == 0 ? 4000 : 600);
+        pass(const Duration(milliseconds: 700));
+      }
+      expect(tuner.firstByteP90, 4000);
+    });
+
     test('many timeouts beside the answers: not below the ones first set', () {
       firstBytes(700);
       // A fifth of the requests time out: the short timeout may be why.
@@ -114,11 +158,11 @@ void main() {
     test('what was seen long ago is not the link now', () {
       firstBytes(700);
       pass(const Duration(seconds: 30));
-      expect(tuner.settings.firstByteTimeoutMs, 8000);
+      expect(tuner.settings.hedgeDelayMs, 3000);
       pass(const Duration(minutes: 11));
       expect(tuner.firstByteP90, isNull);
       // Nothing new to go by: they stay as they were.
-      expect(tuner.settings.firstByteTimeoutMs, 8000);
+      expect(tuner.settings.hedgeDelayMs, 3000);
     });
 
     test('settings change no more often than every twenty seconds', () {
@@ -286,7 +330,8 @@ void main() {
     final other = s.withConcurrency(6);
     expect(other.concurrency, 6);
     expect(other.slowLink, isTrue);
-    expect(other.firstByteTimeoutMs, 8000);
+    expect(other.firstByteTimeoutMs, 15000);
+    expect(other.hedgeDelayMs, 3000);
     expect(other.hedgeFloorMs, 2000);
     expect(other.raceGapMs, 1500);
     expect(other.pieceRounds, 40);
@@ -298,6 +343,8 @@ void main() {
       8,
     );
     expect(tuner.describe(), contains('连接数 2'));
+    // How many measurements each count has: one with 4, none with the rest.
+    expect(tuner.describe(), contains('4 条 ?〔1 个〕，2 条 ?〔0 个〕'));
     expect(tuner.describe(), contains('提前缓冲 12 分钟'));
   });
 }

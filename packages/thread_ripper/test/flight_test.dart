@@ -135,6 +135,13 @@ void main() {
         '00:00:20 s pos=21 buf=0 w=1 idle=0 rx=0 gone=12',
         '00:00:32 stall ms=12000 gone=9',
         '00:00:40 px req=40 err=4 to=3 cut=1 fb=700/1500/4000 sil=9000 kb=2048',
+        '00:00:41 sp kb=900 c=4 su=1',
+        '00:00:42 sp kb=5000 c=4 su=0',
+        '00:00:43 sp kb=1100 c=4 su=1',
+        '00:00:44 sp kb=1000 c=4 su=1',
+        '00:00:45 sp kb=1500 c=6 su=1',
+        '00:01:40 px req=30 err=0 to=0 cut=0 fb=900/5800/7600 sil=2000 kb=1024',
+        '00:02:40 px req=30 err=0 to=0 cut=0 fb=600/1200/1300 sil=2000 kb=1024',
         '00:00:40 api n=5 err=1 ms=900/2500',
         '00:00:50 seek ms=4000 gone=0 pos=300',
         '00:01:00 ev raise q=32 kbps=2900 kb=600',
@@ -158,10 +165,22 @@ void main() {
       expect(text, contains('跳转后等待：1 次，中位 4.0 / 最长 4.0 秒'));
       // Only while the player still took all that came.
       expect(text, contains('共 2 个）：一成 1000 / 中位 1200'));
-      expect(text, contains('代理请求：40 个，失败 10.0%（超时 3），因重复被取消 1'));
-      expect(text, contains('首字节 中位 700 / 九成 1500 / 最大 4000 毫秒'));
+      expect(text, contains('代理请求：100 个，失败 4.0%（超时 3），因重复被取消 1'));
+      // The usual minute, and the worst one beside it.
+      expect(
+        text,
+        contains('首字节 中位 700 / 九成 1500（最慢的一分钟 5800） / 最大 7600 毫秒'),
+      );
       expect(text, contains('最长静默 9.0 秒'));
-      expect(text, contains('共收 2.0 MiB'));
+      expect(text, contains('共收 4.0 MiB'));
+      expect(
+        text,
+        contains(
+          '代理测速（播放器等着下载时，按连接数）：'
+          '4 条 中位 1000〔3 个〕，6 条 中位 1500〔1 个〕 kbit/s'
+          '；下载比播放快时另有 1 个',
+        ),
+      );
       expect(text, contains('接口请求：5 个，失败 20.0%；中位 900 / 九成 2500 毫秒'));
       expect(text, contains('升一档 1，升档后退回 1'));
       expect(text, contains('放弃画面 1'));

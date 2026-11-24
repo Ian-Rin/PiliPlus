@@ -8,13 +8,14 @@
 // app cannot be changed in the air. So the figures follow three things the
 // proxy sees anyway (BtrRangeProxy feeds them in):
 //
-// 1. How long a piece waits for its first byte. The timings were set for a
-//    slowest tenth of two seconds; they are that tenth's multiples
-//    ([_timings]), within bounds. One guard: a timeout that is too short
-//    cuts off the slow answers, which then are never measured, and the
-//    timeouts would stay short. Where many requests time out while others
-//    are answered, the timings do not go below the ones first set, and
-//    with still more, half as much again.
+// 1. How long a piece waits for its first byte. The timings are multiples
+//    of the slowest tenth ([_timings]), within bounds: when a second node
+//    is asked follows it both ways, the two timeouts only upwards from the
+//    ones first set. The tenth is quick to rise and slow to fall
+//    ([firstByteP90]). One guard: a timeout that is too short cuts off the
+//    slow answers, which then are never measured. Where many requests time
+//    out while others are answered, no timing goes below the one first
+//    set, and with still more, half as much again.
 // 2. How long the link was gone while pieces were asked for. The download
 //    ahead is twice the longest of the last hour and two minutes, ten
 //    minutes at least and twenty at most ([bufferSeconds]).
@@ -45,9 +46,17 @@ class RipperLinkTuner {
   // -------------------------------------------------------------------
   // 1. The timings.
 
-  static const _firstByteKept = 60;
+  /// Ten minutes of them: a phone's first flight record had 77 requests a
+  /// minute, and the 60 kept until then were its last 47 seconds.
+  static const _firstByteKept = 900;
   static const _firstByteFor = Duration(minutes: 10);
   static const _firstByteLeast = 10;
+
+  /// The last of them, for a link that has just slowed (see [firstByteP90]).
+  static const _firstByteRecent = 60;
+
+  /// Timeouts are counted against the answers of this long.
+  static const _timeoutFor = Duration(minutes: 2);
 
   /// Not more often than this: every change is a new settings object.
   static const _retimeEvery = Duration(seconds: 20);
@@ -71,22 +80,33 @@ class RipperLinkTuner {
     if (_timeouts.length > _firstByteKept) _timeouts.removeAt(0);
   }
 
-  /// The slowest tenth of the last ten minutes' first bytes, in
-  /// milliseconds; null with too few of them.
+  /// The slowest tenth of the first bytes, in milliseconds: of the last
+  /// ten minutes' or of the last sixty requests', whichever is slower;
+  /// null with too few of them.
+  ///
+  /// Quick to lengthen and slow to shorten: a link that has just slowed
+  /// shows in its last requests at once, and one that was slow a few
+  /// minutes ago will be again (an airliner's goes from one to the other
+  /// by the minute).
   int? get firstByteP90 {
     final since = _now().subtract(_firstByteFor);
-    final recent = [
+    final all = [
       for (final sample in _firstBytes)
         if (sample.at.isAfter(since)) sample.ms,
-    ]..sort();
-    if (recent.length < _firstByteLeast) return null;
-    return recent[((recent.length - 1) * 0.9).round()];
+    ];
+    if (all.length < _firstByteLeast) return null;
+    int tenth(List<int> of) =>
+        (of..sort())[((of.length - 1) * 0.9).round()];
+    final last = all.length > _firstByteRecent
+        ? all.sublist(all.length - _firstByteRecent)
+        : List.of(all);
+    return max(tenth(last), tenth(all));
   }
 
-  /// Of the last ten minutes' requests that either got a first byte or
+  /// Of the last two minutes' requests that either got a first byte or
   /// timed out, the share that timed out.
   double get timeoutShare {
-    final since = _now().subtract(_firstByteFor);
+    final since = _now().subtract(_timeoutFor);
     final timedOut = _timeouts.where((at) => at.isAfter(since)).length;
     final answered = _firstBytes.where((s) => s.at.isAfter(since)).length;
     return answered < 5 ? 0 : timedOut / (timedOut + answered);
@@ -96,6 +116,13 @@ class RipperLinkTuner {
 
   /// The timings for a slowest tenth of [p90] ms, each within its bounds;
   /// no lower than [floor] times the ones first set.
+  ///
+  /// The two timeouts only lengthen. One that is too long costs little: a
+  /// piece that waits is asked of a second node long before (the hedge).
+  /// One that is too short throws away what was waited for, and on a link
+  /// that has just slowed it does so to every piece. On the phone's first
+  /// record the link was quick, the timeout went to the 8 s it could then
+  /// go to, the link slowed, and a first byte came after 7.6 s.
   static ({int firstByte, int stall, int hedge, int hedgeFloor, int raceGap})
   _timings(int p90, double floor) {
     int within(double want, int base, int least, int most) =>
@@ -104,13 +131,13 @@ class RipperLinkTuner {
       firstByte: within(
         4.0 * p90 + 2000,
         RipperDownloadSettings.slowFirstByteTimeoutMs,
-        8000,
+        RipperDownloadSettings.slowFirstByteTimeoutMs,
         30000,
       ),
       stall: within(
         3.0 * p90 + 3000,
         RipperDownloadSettings.slowStallTimeoutMs,
-        8000,
+        RipperDownloadSettings.slowStallTimeoutMs,
         25000,
       ),
       hedge: within(
@@ -332,8 +359,12 @@ class RipperLinkTuner {
           '中途无数据 ${s.stallTimeoutMs / 1000} 秒，'
           '要第二份 ${s.hedgeFloorMs / 1000} 到 ${s.hedgeDelayMs / 1000} 秒，'
           '起播换节点 ${s.raceGapMs / 1000} 秒',
+      // With how many measurements each: a count without a speed is one
+      // with fewer than three, and whether any come in shows here.
       '连接数 $_concurrency（${[
-        for (final count in counts) '$count 条 ${medianWith(count) ?? '?'}',
+        for (final count in counts)
+          '$count 条 ${medianWith(count) ?? '?'}'
+              '〔${_recent(count).length} 个〕',
       ].join('，')} kbit/s）',
       '提前缓冲 ${bufferSeconds ~/ 60} 分钟'
           '（一小时内最长断网 $longestOutageSeconds 秒）',

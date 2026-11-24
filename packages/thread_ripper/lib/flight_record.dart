@@ -29,6 +29,11 @@
 //                          of a minute: made, failed, timed out, cut off as
 //                          the slower copy, time to first byte, longest
 //                          silence while downloading, KiB received
+//   sp kb= c= su=          a speed the proxy measured on the picture's
+//                          track (kbit/s), with so many connections; su=1
+//                          while the player waited on the download (what
+//                          the link does), su=0 for a window that was there
+//                          before it was wanted (the least the link does)
 //   api n= err= ms=p50/p90 the app's own requests of a minute
 //   ev name key=value      giveup (the picture), raise and down (a
 //                          quality above the lowest, and back), broke (a
@@ -138,6 +143,11 @@ class _Summary {
   final _fb50 = <int>[];
   final _fb90 = <int>[];
   int _fbMax = 0, _silence = 0;
+
+  // The proxy's speeds while the player waited, by the connections they
+  // were measured with; and how many it measured otherwise.
+  final _speeds = <int, List<int>>{};
+  int _bursts = 0;
   int _api = 0, _apiErr = 0;
   final _api50 = <int>[];
   final _api90 = <int>[];
@@ -242,6 +252,15 @@ class _Summary {
           if (p50 > 0) _fb50.add(p50);
           if (p90 > 0) _fb90.add(p90);
           if (most > _fbMax) _fbMax = most;
+        }
+      case 'sp':
+        final kbps = line.number('kb');
+        final count = line.number('c');
+        if (kbps == null || count == null) break;
+        if (line.field('su') == '1') {
+          (_speeds[count] ??= []).add(kbps);
+        } else {
+          _bursts++;
         }
       case 'api':
         _api += line.number('n') ?? 0;
@@ -425,9 +444,20 @@ class _Summary {
         '代理请求：$_req 个，失败 ${_percent(_err, _req)}'
         '（超时 $_timeouts），因重复被取消 $_cut；'
         '首字节 中位 ${_median(_fb50)} / 九成 ${_median(_fb90)}'
+        '（最慢的一分钟 ${_fb90.fold(0, (a, b) => a > b ? a : b)}）'
         ' / 最大 $_fbMax 毫秒；'
         '下载中最长静默 ${(_silence / 1000).toStringAsFixed(1)} 秒；'
         '共收 ${(_kib / 1024).toStringAsFixed(1)} MiB',
+      );
+    }
+    if (_speeds.isNotEmpty || _bursts > 0) {
+      final counts = _speeds.keys.toList()..sort();
+      out.add(
+        '代理测速（播放器等着下载时，按连接数）：${counts.isEmpty ? '没有' : [
+                for (final count in counts) '$count 条 中位 ${_median(_speeds[count]!)}〔${_speeds[count]!.length} 个〕',
+              ].join('，')}'
+        '${counts.isEmpty ? '' : ' kbit/s'}'
+        '；下载比播放快时另有 $_bursts 个',
       );
     }
     if (_api > 0) {

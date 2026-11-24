@@ -2244,6 +2244,15 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     // long as a speed is kept here.
     if (FlightMode.on) {
       if (!(sustained && DateTime.now().isBefore(_speedQuietUntil))) {
+        // Into the flight's record with the connections it was measured
+        // with (read before the tuner may change them): what each count
+        // does on this link is then there to be read afterwards, whether
+        // or not the tuner had enough of them to decide by.
+        FlightLog.add('sp', {
+          'kb': kbps,
+          'c': FlightMode.tuner?.concurrency ?? 4,
+          'su': sustained,
+        });
         FlightMode.noteSpeed(kbps);
         // And for the connections ([FlightMode.tuner]): another count is
         // tried only while playback is not waiting on the download.
